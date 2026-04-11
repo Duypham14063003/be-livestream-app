@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: livestream-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: livestream
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - ./docker/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d livestream"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: livestream-pgadmin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@livestream.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "${PGADMIN_PORT:-55050}:80"
+    volumes:
+      - /tmp/livestream-pgadmin:/var/lib/pgadmin

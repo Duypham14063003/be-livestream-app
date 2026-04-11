@@ -1,0 +1,280 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  HOST
+  MODERATOR
+}
+
+enum VenueType {
+  ONLINE
+  OFFLINE
+  HYBRID
+}
+
+enum SeatStatus {
+  AVAILABLE
+  HELD
+  BOOKED
+  CHECKED_IN
+}
+
+enum ReservationStatus {
+  HELD
+  CONFIRMED
+  EXPIRED
+  CANCELLED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  REFUND_PENDING
+  REFUNDED
+  CANCELLED
+}
+
+enum PaymentProvider {
+  STRIPE
+  PAYPAL
+  APPLE_PAY
+  GOOGLE_PAY
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum TicketStatus {
+  ACTIVE
+  USED
+  REFUNDED
+  EXPIRED
+}
+
+enum LiveRoomStatus {
+  SCHEDULED
+  LIVE
+  ENDED
+}
+
+enum LiveParticipantRole {
+  HOST
+  CO_HOST
+  AUDIENCE
+  BLOCKED
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+model User {
+  id             String            @id @default(cuid())
+  email          String?           @unique
+  phone          String?           @unique
+  password       String?
+  displayName    String?
+  role           UserRole          @default(USER)
+  kycStatus      String?
+  trustedDevice  String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  reservations   Reservation[]
+  orders         Order[]
+  liveActions    LiveTimelineEvent[] @relation("LiveActionActor")
+  participants   LiveParticipant[]
+}
+
+model Event {
+  id           String        @id @default(cuid())
+  title        String
+  description  String?
+  startAt      DateTime
+  endAt        DateTime
+  venueType    VenueType
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  seats        Seat[]
+  reservations Reservation[]
+  liveRoom     LiveRoom?
+}
+
+model Seat {
+  id               String            @id @default(cuid())
+  eventId          String
+  zone             String
+  row              String
+  number           String
+  status           SeatStatus        @default(AVAILABLE)
+  price            Int
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  event            Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  reservationSeats ReservationSeat[]
+  ticket           Ticket?
+
+  @@unique([eventId, zone, row, number])
+}
+
+model Reservation {
+  id               String            @id @default(cuid())
+  userId           String
+  eventId          String
+  status           ReservationStatus @default(HELD)
+  expiresAt        DateTime
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  user             User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  event            Event             @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  reservationSeats ReservationSeat[]
+  order            Order?
+
+  @@index([eventId, status])
+  @@index([userId, status])
+}
+
+model ReservationSeat {
+  id            String      @id @default(cuid())
+  reservationId String
+  seatId        String
+  price         Int
+  createdAt     DateTime    @default(now())
+  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  seat          Seat        @relation(fields: [seatId], references: [id], onDelete: Restrict)
+
+  @@unique([reservationId, seatId])
+  @@index([seatId])
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  userId         String
+  reservationId  String      @unique
+  amount         Int
+  currency       String      @default("USD")
+  status         OrderStatus @default(PENDING)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  user           User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  reservation    Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  payment        Payment?
+  tickets        Ticket[]
+}
+
+model Payment {
+  id             String          @id @default(cuid())
+  orderId        String          @unique
+  provider       PaymentProvider
+  providerRef    String?
+  status         PaymentStatus   @default(PENDING)
+  paidAt         DateTime?
+  idempotencyKey String          @unique
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  refunds        Refund[]
+}
+
+model Ticket {
+  id          String      @id @default(cuid())
+  orderId     String
+  seatId      String      @unique
+  qrCode      String      @unique
+  pdfUrl      String?
+  status      TicketStatus @default(ACTIVE)
+  checkedInAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  order       Order       @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  seat        Seat        @relation(fields: [seatId], references: [id], onDelete: Restrict)
+}
+
+model LiveRoom {
+  id            String              @id @default(cuid())
+  eventId        String?             @unique
+  title          String?
+  agoraChannel   String              @unique
+  status         LiveRoomStatus      @default(SCHEDULED)
+  startedAt      DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  event          Event?              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  participants   LiveParticipant[]
+  overlays       LiveOverlay[]
+  timelineEvents LiveTimelineEvent[]
+
+  @@index([status, startedAt])
+}
+
+model LiveParticipant {
+  id        String              @id @default(cuid())
+  roomId    String
+  userId    String
+  role      LiveParticipantRole @default(AUDIENCE)
+  joinedAt  DateTime            @default(now())
+  leftAt    DateTime?
+  room      LiveRoom            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([roomId, userId])
+}
+
+model LiveOverlay {
+  id        String   @id @default(cuid())
+  roomId    String
+  type      String
+  payload   Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  room      LiveRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model LiveTimelineEvent {
+  id          String   @id @default(cuid())
+  roomId       String
+  actorUserId  String?
+  action       String
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  room         LiveRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actor        User?    @relation("LiveActionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+}
+
+model Refund {
+  id             String       @id @default(cuid())
+  paymentId       String
+  amount          Int
+  reason          String?
+  status          RefundStatus @default(PENDING)
+  idempotencyKey  String       @unique
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  payment         Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String
+  entityType String
+  entityId   String
+  payload    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
