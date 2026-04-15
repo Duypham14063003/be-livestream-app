@@ -19,21 +19,157 @@ Backend được scaffold theo `SPEC_flutter.md` cho hệ thống Event Streamin
 - `tickets`: ticket wallet, ticket detail, PDF URL
 - `livestream`: lấy token join room, mute/promote, overlays
 - `webhooks`: stripe/paypal webhook endpoints
-- `realtime`: publish các realtime events qua websocket namespace `/realtime`
+- `realtime`: publish các realtime events qua Socket.IO path `/ws`
 
-## Realtime topics (WebSocket `/realtime`)
+## Realtime topics (Socket.IO `/ws`)
 
-| Topic                    | Trigger                                  | Description                   |
-| ------------------------ | ---------------------------------------- | ----------------------------- |
-| `seat.updated`           | Ghế được giữ / mua / trả                 | Cập nhật trạng thái ghế       |
-| `reservation.expired`    | Reservation hết TTL hoặc expire thủ công | Reservation hết hạn giữ ghế   |
-| `order.paid`             | Thanh toán thành công                    | Đơn hàng được thanh toán      |
-| `ticket.issued`          | Reservation confirmed                    | Vé được phát hành             |
-| `live.room.created`      | User tạo phòng                           | Phòng livestream mới được tạo |
-| `live.participant.joined`| User tham gia phòng                      | Người xem tham gia livestream  |
-| `live.participant.left`  | User rời / bị remove                     | Người xem rời khỏi phòng      |
-| `live.overlay.updated`   | Overlay thay đổi                         | Overlay livestream thay đổi   |
-| `live.moderation.action` | Mute / remove / promote                  | Hành động kiểm duyệt          |
+| Topic                     | Trigger                                  | Description                   |
+| ------------------------- | ---------------------------------------- | ----------------------------- |
+| `seat.updated`            | Ghế được giữ / mua / trả                 | Cập nhật trạng thái ghế       |
+| `reservation.expired`     | Reservation hết TTL hoặc expire thủ công | Reservation hết hạn giữ ghế   |
+| `order.paid`              | Thanh toán thành công                    | Đơn hàng được thanh toán      |
+| `ticket.issued`           | Reservation confirmed                    | Vé được phát hành             |
+| `live.room.created`       | User tạo phòng                           | Phòng livestream mới được tạo |
+| `livestream.participant.joined` | User tham gia phòng                | Người xem tham gia livestream |
+| `livestream.participant.left`   | User rời / bị remove               | Người xem rời khỏi phòng      |
+| `live.overlay.updated`    | Overlay thay đổi                         | Overlay livestream thay đổi   |
+| `live.moderation.action`  | Mute / remove / promote                  | Hành động kiểm duyệt          |
+| `livestream.comment.created`    | Tạo bình luận                      | Bình luận mới trong room      |
+| `livestream.gift.sent`          | Gửi quà                            | Quà mới trong room            |
+| `livestream.viewer_count.updated` | Join/leave websocket            | Số viewer gần realtime        |
+| `livestream.commenting.toggled` | Host/cohost bật tắt bình luận     | Trạng thái bình luận thay đổi |
+
+### Flutter Livestream Realtime
+
+Livestream mobile client MUST use `socket_io_client`, không dùng `web_socket_channel`, vì backend sử dụng Socket.IO protocol chứ không phải raw WebSocket.
+
+**Connection settings**
+
+- Host: `http://<host>:3000`
+- Socket.IO path: `/ws`
+- Auth: `auth: {'token': '<jwt>'}` hoặc query `?token=<jwt>`
+- Transport: websocket only
+
+**Subscribe frame**
+
+```json
+{
+  "type": "subscribe",
+  "payload": {
+    "topic": "livestream.room.<roomId>.comments"
+  }
+}
+```
+
+**Server event envelope**
+
+```json
+{
+  "type": "livestream.comment.created",
+  "payload": {
+    "roomId": "room_123",
+    "room_id": "room_123",
+    "data": {
+      "id": "cmt_123",
+      "roomId": "room_123",
+      "room_id": "room_123",
+      "userId": "user_1",
+      "user_id": "user_1",
+      "displayName": "Alice",
+      "display_name": "Alice",
+      "message": "hello",
+      "createdAt": "2026-04-15T09:00:00.000Z",
+      "created_at": "2026-04-15T09:00:00.000Z",
+      "isHost": false,
+      "is_host": false
+    }
+  },
+  "timestamp": "2026-04-15T09:00:00.000Z"
+}
+```
+
+**Flutter example**
+
+```dart
+import 'dart:async';
+import 'package:socket_io_client/socket_io_client.dart' as io;
+
+class LivestreamSocketManager {
+  LivestreamSocketManager(this.baseUrl);
+
+  final String baseUrl;
+  io.Socket? _socket;
+  final _events = StreamController<Map<String, dynamic>>.broadcast();
+  final _pendingTopics = <String>{};
+
+  Stream<Map<String, dynamic>> get events => _events.stream;
+  bool get isConnected => _socket?.connected == true;
+
+  Future<void> connect({required String token}) async {
+    _socket?.dispose();
+
+    _socket = io.io(
+      baseUrl,
+      io.OptionBuilder()
+          .setPath('/ws')
+          .setTransports(['websocket'])
+          .disableAutoConnect()
+          .enableReconnection()
+          .setAuth({'token': token})
+          .setQuery({'token': token})
+          .build(),
+    );
+
+    _socket!
+      ..onConnect((_) {
+        for (final topic in _pendingTopics) {
+          _socket!.emit('message', {
+            'type': 'subscribe',
+            'payload': {'topic': topic},
+          });
+        }
+      })
+      ..on('livestream.comment.created', _handleEvent)
+      ..on('livestream.gift.sent', _handleEvent)
+      ..on('livestream.viewer_count.updated', _handleEvent)
+      ..on('livestream.participant.joined', _handleEvent)
+      ..on('livestream.commenting.toggled', _handleEvent)
+      ..onDisconnect((_) {})
+      ..connect();
+  }
+
+  void subscribe(String topic) {
+    _pendingTopics.add(topic);
+    if (isConnected) {
+      _socket!.emit('message', {
+        'type': 'subscribe',
+        'payload': {'topic': topic},
+      });
+    }
+  }
+
+  void unsubscribe(String topic) {
+    _pendingTopics.remove(topic);
+    if (isConnected) {
+      _socket!.emit('message', {
+        'type': 'unsubscribe',
+        'payload': {'topic': topic},
+      });
+    }
+  }
+
+  void _handleEvent(dynamic raw) {
+    if (raw is Map) {
+      _events.add(Map<String, dynamic>.from(raw));
+    }
+  }
+
+  Future<void> dispose() async {
+    _socket?.dispose();
+    await _events.close();
+  }
+}
+```
 
 ## Quick Start
 
@@ -1070,11 +1206,11 @@ Lấy danh sách phòng livestream mà user có quyền truy cập.
   "data": [
     {
       "id": "room_xyz",
-      "event_id": "evt_abc123",
       "title": "Hội thảo Công nghệ 2026",
       "agora_channel": "channel_evt_abc123",
       "status": "live",
       "viewer_count": 1523,
+      "viewerCount": 1523,
       "host_id": "clx123abc456",
       "started_at": "2026-05-01T09:00:00.000Z"
     }
@@ -1093,8 +1229,84 @@ Lấy danh sách phòng livestream mà user có quyền truy cập.
 **Access Control:**
 
 - `ADMIN`: thấy tất cả phòng
-- User có `CONFIRMED` reservation cho event: thấy phòng của event đó
 - User là participant của phòng: thấy phòng đó
+
+---
+
+### `POST /livestream/rooms/:roomId/comments` — Tạo comment
+
+**Auth:** Cần (Bearer token)
+
+**Request Body:**
+
+```json
+{
+  "message": "Hello livestream"
+}
+```
+
+**Success Response `201 Created`:**
+
+```json
+{
+  "data": {
+    "id": "cmt_123",
+    "roomId": "room_xyz",
+    "room_id": "room_xyz",
+    "userId": "clx_user_1",
+    "user_id": "clx_user_1",
+    "displayName": "Alice",
+    "display_name": "Alice",
+    "message": "Hello livestream",
+    "createdAt": "2026-04-15T09:00:00.000Z",
+    "created_at": "2026-04-15T09:00:00.000Z",
+    "isHost": false,
+    "is_host": false
+  }
+}
+```
+
+**Realtime Event:** `livestream.comment.created`
+
+---
+
+### `POST /livestream/rooms/:roomId/gifts` — Gửi gift
+
+**Auth:** Cần (Bearer token)
+
+**Request Body:**
+
+```json
+{
+  "giftType": "heart"
+}
+```
+
+**Success Response `201 Created`:**
+
+```json
+{
+  "data": {
+    "id": "gift_123",
+    "roomId": "room_xyz",
+    "room_id": "room_xyz",
+    "userId": "clx_user_1",
+    "user_id": "clx_user_1",
+    "displayName": "Alice",
+    "display_name": "Alice",
+    "giftType": "heart",
+    "gift_type": "heart",
+    "giftName": "Heart",
+    "gift_name": "Heart",
+    "giftEmoji": "❤️",
+    "gift_emoji": "❤️",
+    "createdAt": "2026-04-15T09:00:00.000Z",
+    "created_at": "2026-04-15T09:00:00.000Z"
+  }
+}
+```
+
+**Realtime Event:** `livestream.gift.sent`
 
 ---
 
@@ -1110,17 +1322,19 @@ Lấy Agora RTC token để tham gia phòng livestream.
 
 ```json
 {
-  "room_id": "room_xyz",
-  "user_id": "clx123abc456",
-  "role": "audience"
+  "channelName": "event-live-001",
+  "uid": 1001,
+  "role": "host"
 }
 ```
 
-| Field     | Type     | Required | Description                                                      |
-| --------- | -------- | -------- | ---------------------------------------------------------------- |
-| `room_id` | `string` | ✅       | LiveRoom ID                                                      |
-| `user_id` | `string` | ✅       | User ID muốn join — phải khớp với authenticated user (trừ ADMIN) |
-| `role`    | `string` | ✅       | `host` \| `cohost` \| `audience`                                 |
+| Field         | Type     | Required | Description                 |
+| ------------- | -------- | -------- | --------------------------- |
+| `channelName` | `string` | ✅       | Agora channel name          |
+| `uid`         | `number` | ✅       | Agora UID (số nguyên dương) |
+| `role`        | `string` | ✅       | `host` \| `audience`        |
+
+Legacy compatibility: backend vẫn chấp nhận `channel_name`.
 
 **Token Expiry:**
 
@@ -1132,42 +1346,38 @@ Lấy Agora RTC token để tham gia phòng livestream.
 ```json
 {
   "data": {
+    "token": "007eJxTY...",
     "app_id": "agora_app_id_xxx",
+    "appId": "agora_app_id_xxx",
     "channel_name": "channel_evt_abc123",
-    "token": "eyJhbGciOiJIUzI1NiJ9...",
-    "uid": 1234567890,
+    "channelName": "channel_evt_abc123",
+    "uid": 1001,
     "expire_at": "2026-04-09T12:30:00.000Z"
   }
 }
 ```
-
-**Agora UID:** Được tạo stable từ user_id (hash → số 1–4294967294).
 
 **Agora Role Mapping:**
 
 | Requested Role | Participant Role | Token Privilege     |
 | -------------- | ---------------- | ------------------- |
 | `audience`     | AUDIENCE         | Subscribe only      |
-| `cohost`       | CO_HOST / HOST   | Publish + Subscribe |
 | `host`         | HOST             | Publish + Subscribe |
 
 **Error Responses:**
 
-| Status | Code                      | Condition                                           |
-| ------ | ------------------------- | --------------------------------------------------- |
-| `403`  | `forbidden`               | `user_id` không khớp authenticated user (non-admin) |
-| `403`  | `forbidden`               | User bị blocked trong phòng                         |
-| `403`  | `forbidden`               | User không có quyền truy cập phòng                  |
-| `404`  | `room_not_found`          | Phòng không tồn tại                                 |
-| `422`  | `invalid_role`            | `role` không hợp lệ                                 |
-| `500`  | `token_generation_failed` | Thiếu Agora credentials                             |
+| Status | Code                 | Condition                 |
+| ------ | -------------------- | ------------------------- |
+| `422`  | `invalid_role`       | `role` không hợp lệ       |
+| `422`  | `invalid_uid`        | `uid` không hợp lệ        |
+| `500`  | `agora_token_failed` | Không thể tạo Agora token |
 
 **Mobile Integration:**
 
 ```dart
 // 1. Join livestream room
 final tokenRes = await dio.post('/livestream/token',
-  data: {'room_id': roomId, 'user_id': currentUserId, 'role': 'audience'},
+  data: {'channelName': 'event-live-001', 'uid': 1001, 'role': 'host'},
   options: Options(headers: {'Authorization': 'Bearer $accessToken'})
 );
 
@@ -1198,12 +1408,14 @@ agoraEngine.joinChannel(
 }
 ```
 
-| Field              | Type     | Required | Description                                |
-| ------------------ | -------- | -------- | ------------------------------------------ |
-| `room_id`          | `string` | ✅       | LiveRoom ID                                |
-| `target_user_id`   | `string` | ✅       | User ID cần mute                           |
-| `reason`           | `string` | ❌       | Lý do mute                                 |
-| `duration_seconds` | `number` | ❌       | Thời gian mute (giây), mặc định: vĩnh viễn |
+| Field              | Type     | Required | Description      |
+| ------------------ | -------- | -------- | ---------------- |
+| `room_id`          | `string` | ✅       | LiveRoom ID      |
+| `target_user_id`   | `string` | ✅       | User ID cần mute |
+| `reason`           | `string` | ❌       | Lý do mute       |
+| `duration_seconds` | `number` | ❌       |
+
+|
 
 **Success Response `200 OK`:**
 
@@ -1249,7 +1461,7 @@ agoraEngine.joinChannel(
 }
 ```
 
-**Realtime Events:** `live.participant.left` + `live.moderation.action`
+**Realtime Events:** `livestream.participant.left` + `live.moderation.action`
 
 ---
 
@@ -1520,4 +1732,5 @@ agoraEngine.joinChannel(
 - Reservation TTL job chạy mỗi phút để auto-expire các reservation quá hạn.
 - Không có refresh token storage/invalidation — logout là no-op phía server (client tự xóa tokens).
 - CORS hiện mở toàn bộ (`origin: '*'`) — production nên restrict.
+
 # be-livestream-app

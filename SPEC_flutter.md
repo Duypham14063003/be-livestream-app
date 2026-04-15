@@ -349,14 +349,45 @@ GET    /livestream/{roomId}/overlays
 ### 6.6 Realtime Event Topics
 
 ```txt
-seat.updated
-reservation.expired
-order.paid
-ticket.issued
-live.participant.joined
-live.participant.left
-live.overlay.updated
-live.moderation.action
+livestream.comment.created
+livestream.gift.sent
+livestream.viewer_count.updated
+livestream.participant.joined
+livestream.participant.left
+livestream.commenting.toggled
+```
+
+### 6.6.1 Livestream Socket.IO Contract
+
+```txt
+Transport: Socket.IO
+Host: http://<host>:3000
+Path: /ws
+Auth: auth.token=<jwt> or ?token=<jwt>
+```
+
+Subscribe message:
+
+```json
+{
+  "type": "subscribe",
+  "payload": {
+    "topic": "livestream.room.<roomId>.comments"
+  }
+}
+```
+
+Event envelope:
+
+```json
+{
+  "type": "livestream.comment.created",
+  "payload": {
+    "roomId": "room_123",
+    "data": {}
+  },
+  "timestamp": "2026-04-15T09:00:00.000Z"
+}
 ```
 
 ### 6.7 Key Libraries (Flutter)
@@ -366,7 +397,7 @@ flutter_riverpod
 go_router
 dio
 freezed + json_serializable
-web_socket_channel
+socket_io_client
 agora_rtc_engine
 flutter_stripe
 pay (Google Pay / Apple Pay)

@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import "dotenv/config";
 import {
   LiveParticipantRole,
   LiveRoomStatus,
@@ -6,15 +6,16 @@ import {
   PrismaClient,
   UserRole,
   VenueType,
-} from '@prisma/client';
-import * as bcrypt from 'bcrypt';
+} from "@prisma/client";
+import * as bcrypt from "bcrypt";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  const adminSeedEmail = process.env.ADMIN_SEED_EMAIL ?? 'admin@demo.local';
-  const adminSeedPassword = process.env.ADMIN_SEED_PASSWORD ?? 'Admin1234!';
-  const adminSeedDisplayName = process.env.ADMIN_SEED_DISPLAY_NAME ?? 'Operations Admin';
+  const adminSeedEmail = process.env.ADMIN_SEED_EMAIL ?? "admin@demo.local";
+  const adminSeedPassword = process.env.ADMIN_SEED_PASSWORD ?? "Admin1234!";
+  const adminSeedDisplayName =
+    process.env.ADMIN_SEED_DISPLAY_NAME ?? "Operations Admin";
   const adminSeedPasswordHash = await bcrypt.hash(adminSeedPassword, 10);
 
   await prisma.$transaction([
@@ -37,15 +38,15 @@ async function main() {
   const [customer, host, admin] = await prisma.$transaction([
     prisma.user.create({
       data: {
-        email: 'customer@demo.local',
-        phone: '+8499990001',
+        email: "customer@demo.local",
+        phone: "+8499990001",
         role: UserRole.USER,
       },
     }),
     prisma.user.create({
       data: {
-        email: 'host@demo.local',
-        phone: '+8499990002',
+        email: "host@demo.local",
+        phone: "+8499990002",
         role: UserRole.HOST,
       },
     }),
@@ -65,48 +66,47 @@ async function main() {
 
   const event = await prisma.event.create({
     data: {
-      title: 'Tech Broadcast Summit 2026',
+      title: "Tech Broadcast Summit 2026",
       description:
-        'Sự kiện livestream với keynote, panel và networking realtime.',
+        "Sự kiện livestream với keynote, panel và networking realtime.",
       startAt: start,
       endAt: end,
       venueType: VenueType.HYBRID,
-      liveRoom: {
+    },
+  });
+
+  const liveRoom = await prisma.liveRoom.create({
+    data: {
+      title: "Tech Broadcast Summit 2026 - Live",
+      agoraChannel: "tech-broadcast-summit-2026",
+      status: LiveRoomStatus.LIVE,
+      startedAt: new Date(),
+      participants: {
         create: {
-          agoraChannel: 'tech-broadcast-summit-2026',
-          status: LiveRoomStatus.LIVE,
-          startedAt: new Date(),
-          participants: {
-            create: {
-              userId: host.id,
-              role: LiveParticipantRole.HOST,
-            },
-          },
-          overlays: {
-            createMany: {
-              data: [
-                {
-                  type: 'banner',
-                  payload: {
-                    text: 'Early bird ticket ends in 2 hours',
-                    cta: 'Book now',
-                  },
-                },
-                {
-                  type: 'poll',
-                  payload: {
-                    question: 'Bạn mong chờ track nào nhất?',
-                    options: ['AI', 'Cloud', 'Mobile'],
-                  },
-                },
-              ],
-            },
-          },
+          userId: host.id,
+          role: LiveParticipantRole.HOST,
         },
       },
-    },
-    include: {
-      liveRoom: true,
+      overlays: {
+        createMany: {
+          data: [
+            {
+              type: "banner",
+              payload: {
+                text: "Early bird ticket ends in 2 hours",
+                cta: "Book now",
+              },
+            },
+            {
+              type: "poll",
+              payload: {
+                question: "Bạn mong chờ track nào nhất?",
+                options: ["AI", "Cloud", "Mobile"],
+              },
+            },
+          ],
+        },
+      },
     },
   });
 
@@ -118,14 +118,14 @@ async function main() {
     price: number;
   }> = [];
 
-  ['A', 'B'].forEach((zone, zoneIndex) => {
+  ["A", "B"].forEach((zone, zoneIndex) => {
     for (let row = 1; row <= 3; row += 1) {
       for (let seat = 1; seat <= 8; seat += 1) {
         seats.push({
           eventId: event.id,
           zone,
           row: row.toString(),
-          number: seat.toString().padStart(2, '0'),
+          number: seat.toString().padStart(2, "0"),
           price: zoneIndex === 0 ? 15000 : 10000,
         });
       }
@@ -136,8 +136,8 @@ async function main() {
 
   await prisma.auditLog.create({
     data: {
-      action: 'SEED_COMPLETED',
-      entityType: 'SYSTEM',
+      action: "SEED_COMPLETED",
+      entityType: "SYSTEM",
       entityId: event.id,
       payload: {
         seededUsers: [customer.id, host.id],
@@ -149,7 +149,7 @@ async function main() {
   });
 
   console.log(
-    `Seed done: event=${event.id}, room=${event.liveRoom?.id}, seats=${seats.length}, admin=${adminSeedEmail}`,
+    `Seed done: event=${event.id}, room=${liveRoom.id}, seats=${seats.length}`,
   );
 }
 

@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { Prisma, TicketStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 
@@ -6,18 +10,14 @@ import { PrismaService } from "../../prisma/prisma.service";
 export class TicketsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  getTickets(userId?: string, status?: TicketStatus) {
-    const where: Prisma.TicketWhereInput = {
-      status,
-      order: userId
-        ? {
-            userId,
-          }
-        : undefined,
-    };
-
+  getTickets(userId: string, status?: TicketStatus) {
     return this.prisma.ticket.findMany({
-      where,
+      where: {
+        status,
+        order: {
+          userId,
+        },
+      },
       include: {
         seat: true,
         order: {
@@ -36,7 +36,7 @@ export class TicketsService {
     });
   }
 
-  async getTicketById(id: string) {
+  async getTicketById(id: string, userId: string) {
     const ticket = await this.prisma.ticket.findUnique({
       where: { id },
       include: {
@@ -58,11 +58,15 @@ export class TicketsService {
       throw new NotFoundException("Ticket khong ton tai");
     }
 
+    if (ticket.order.userId !== userId) {
+      throw new ForbiddenException("Bạn không có quyền xem ticket này");
+    }
+
     return ticket;
   }
 
-  async getTicketPdf(id: string) {
-    const document = await this.resolveTicketDocument(id);
+  async getTicketPdf(id: string, userId: string) {
+    const document = await this.resolveTicketDocument(id, userId);
 
     return {
       ticketId: document.ticketId,
@@ -70,12 +74,17 @@ export class TicketsService {
     };
   }
 
-  async resolveTicketDocument(id: string) {
+  async resolveTicketDocument(id: string, userId?: string) {
     const ticket = await this.prisma.ticket.findUnique({
       where: { id },
       select: {
         id: true,
         pdfUrl: true,
+        order: {
+          select: {
+            userId: true,
+          },
+        },
       },
     });
 
@@ -83,6 +92,9 @@ export class TicketsService {
       throw new NotFoundException("Ticket khong ton tai");
     }
 
+    if (userId && ticket.order.userId !== userId) {
+      throw new ForbiddenException("Bạn không có quyền tải ticket này");
+    }
     const hasStoredDocument = Boolean(ticket.pdfUrl);
     const documentUrl =
       ticket.pdfUrl ?? `https://cdn.example.com/tickets/${ticket.id}.pdf`;

@@ -1,11 +1,12 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { EventEmitter2 } from '@nestjs/event-emitter';
+} from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { EventEmitter2 } from "@nestjs/event-emitter";
 import {
   OrderStatus,
   PaymentStatus,
@@ -14,14 +15,14 @@ import {
   ReservationStatus,
   SeatStatus,
   TicketStatus,
-} from '@prisma/client';
-import { randomUUID } from 'crypto';
-import { REALTIME_TOPICS } from '../../common/constants/realtime-topics';
-import { PrismaService } from '../../prisma/prisma.service';
-import { SystemSettingsService } from '../system-settings/system-settings.service';
-import { ConfirmReservationDto } from './dto/confirm-reservation.dto';
-import { CreateReservationDto } from './dto/create-reservation.dto';
-import { ExpireReservationDto } from './dto/expire-reservation.dto';
+} from "@prisma/client";
+import { randomUUID } from "crypto";
+import { REALTIME_TOPICS } from "../../common/constants/realtime-topics";
+import { PrismaService } from "../../prisma/prisma.service";
+import { SystemSettingsService } from "../system-settings/system-settings.service";
+import { ConfirmReservationDto } from "./dto/confirm-reservation.dto";
+import { CreateReservationDto } from "./dto/create-reservation.dto";
+import { ExpireReservationDto } from "./dto/expire-reservation.dto";
 
 type ReservationMutationRecord = Prisma.ReservationGetPayload<{
   include: {
@@ -63,26 +64,41 @@ export class ReservationsService {
     private readonly systemSettingsService: SystemSettingsService,
   ) {}
 
-  async createHold(dto: CreateReservationDto) {
-    const ttlMinutes = this.systemSettingsService.getSeatHoldFallbackMinutes();
+  async createHold(dto: CreateReservationDto, authUser: { userId: string }) {
+    const event = await this.prisma.event.findUnique({
+      where: { id: dto.eventId },
+    });
+    if (!event) {
+      throw new NotFoundException("Event không tồn tại");
+    }
+
+    const uniqueSeatIds = [...new Set(dto.seatIds)];
+    if (uniqueSeatIds.length !== dto.seatIds.length) {
+      throw new BadRequestException("seatIds không được trùng nhau");
+    }
+
+    const ttlMinutes = Number(
+      this.configService.get<string>("SEAT_HOLD_TTL_MINUTES") ?? 10,
+    );
     const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
     const reservation = await this.prisma.$transaction((tx) =>
       this.createHeldReservationRecord(tx, {
-        userId: dto.userId,
+        userId: authUser.userId,
         eventId: dto.eventId,
         seatIds: dto.seatIds,
         source: ReservationSource.CHECKOUT,
         expiresAt,
-        auditAction: 'RESERVATION_HELD',
+        auditAction: "RESERVATION_HELD",
       }),
     );
 
-    this.emitReservationHeldEvents(
-      reservation.eventId,
-      reservation.id,
-      reservation.reservationSeats.map((item) => item.seatId),
-      reservation.expiresAt,
-    );
+    this.eventEmitter.emit(REALTIME_TOPICS.SEAT_UPDATED, {
+      eventId: dto.eventId,
+      seatIds: uniqueSeatIds,
+      status: SeatStatus.HELD,
+      reservationId: reservation.id,
+      expiresAt: reservation.expiresAt,
+    });
 
     return reservation;
   }
@@ -110,11 +126,15 @@ export class ReservationsService {
       seatIds: params.seatIds,
       source: ReservationSource.ADMIN_MANUAL_ORDER,
       expiresAt,
-      auditAction: 'RESERVATION_HELD',
+      auditAction: "RESERVATION_HELD",
     });
   }
 
-  async confirmReservation(reservationId: string, dto: ConfirmReservationDto) {
+  async confirmReservation(
+    reservationId: string,
+    dto: ConfirmReservationDto,
+    authUser?: { userId: string },
+  ) {
     const result = await this.prisma.$transaction(async (tx) => {
       const reservation = await tx.reservation.findUnique({
         where: { id: reservationId },
@@ -130,10 +150,19 @@ export class ReservationsService {
       });
 
       if (!reservation) {
-        throw new NotFoundException('Reservation khÃ´ng tá»“n táº¡i');
+        throw new NotFoundException("Reservation khÃ´ng tá»“n táº¡i");
       }
 
-      if (reservation.status === ReservationStatus.CONFIRMED && reservation.order) {
+      if (authUser && reservation.userId !== authUser.userId) {
+        throw new ForbiddenException(
+          "Bạn không có quyền xác nhận reservation này",
+        );
+      }
+
+      if (
+        reservation.status === ReservationStatus.CONFIRMED &&
+        reservation.order
+      ) {
         return {
           reservation,
           order: reservation.order,
@@ -142,30 +171,40 @@ export class ReservationsService {
       }
 
       if (reservation.status !== ReservationStatus.HELD) {
-        throw new BadRequestException('Reservation khÃ´ng á»Ÿ tráº¡ng thÃ¡i HELD');
+        throw new BadRequestException(
+          "Reservation khÃ´ng á»Ÿ tráº¡ng thÃ¡i HELD",
+        );
       }
 
       if (reservation.expiresAt.getTime() <= Date.now()) {
-        throw new ConflictException('Reservation Ä‘Ã£ háº¿t háº¡n, vui lÃ²ng giá»¯ gháº¿ láº¡i');
+        throw new ConflictException(
+          "Reservation Ä‘Ã£ háº¿t háº¡n, vui lÃ²ng giá»¯ gháº¿ láº¡i",
+        );
       }
 
       if (reservation.reservationSeats.length === 0) {
-        throw new BadRequestException('Reservation chÆ°a cÃ³ gháº¿ nÃ o');
+        throw new BadRequestException("Reservation chÆ°a cÃ³ gháº¿ nÃ o");
       }
 
       const conflictingPayment = await tx.payment.findUnique({
         where: { idempotencyKey: dto.idempotencyKey },
       });
 
-      if (conflictingPayment && conflictingPayment.orderId !== reservation.order?.id) {
-        throw new ConflictException('idempotencyKey Ä‘Ã£ Ä‘Æ°á»£c sá»­ dá»¥ng cho giao dá»‹ch khÃ¡c');
+      if (
+        conflictingPayment &&
+        conflictingPayment.orderId !== reservation.order?.id
+      ) {
+        throw new ConflictException(
+          "idempotencyKey Ä‘Ã£ Ä‘Æ°á»£c sá»­ dá»¥ng cho giao dá»‹ch khÃ¡c",
+        );
       }
 
       const totalAmount = reservation.reservationSeats.reduce(
         (sum, item) => sum + item.price,
         0,
       );
-      const currency = this.configService.get<string>('DEFAULT_CURRENCY') ?? 'USD';
+      const currency =
+        this.configService.get<string>("DEFAULT_CURRENCY") ?? "USD";
 
       const order = reservation.order
         ? await tx.order.update({
@@ -217,7 +256,9 @@ export class ReservationsService {
             },
           });
 
-      const existingTicketSeatIds = new Set(order.tickets.map((ticket) => ticket.seatId));
+      const existingTicketSeatIds = new Set(
+        order.tickets.map((ticket) => ticket.seatId),
+      );
       const newTicketSeats = reservation.reservationSeats.filter(
         (seat) => !existingTicketSeatIds.has(seat.seatId),
       );
@@ -254,8 +295,8 @@ export class ReservationsService {
 
       await tx.auditLog.create({
         data: {
-          action: 'RESERVATION_CONFIRMED',
-          entityType: 'reservation',
+          action: "RESERVATION_CONFIRMED",
+          entityType: "reservation",
           entityId: reservation.id,
           payload: {
             paymentId: payment.id,
@@ -284,7 +325,7 @@ export class ReservationsService {
     });
 
     if (!result.order) {
-      throw new NotFoundException('Order khÃ´ng tá»“n táº¡i sau khi confirm');
+      throw new NotFoundException("Order khÃ´ng tá»“n táº¡i sau khi confirm");
     }
 
     this.eventEmitter.emit(REALTIME_TOPICS.ORDER_PAID, {
@@ -311,16 +352,21 @@ export class ReservationsService {
   }
 
   async expireReservation(reservationId: string, dto?: ExpireReservationDto) {
-    const reason = dto?.reason ?? 'manual_expire';
+    const reason = dto?.reason ?? "manual_expire";
     const expired = await this.prisma.$transaction(async (tx) => {
-      const reservation = await this.getReservationForMutation(tx, reservationId);
+      const reservation = await this.getReservationForMutation(
+        tx,
+        reservationId,
+      );
 
       if (!reservation) {
-        throw new NotFoundException('Reservation khÃ´ng tá»“n táº¡i');
+        throw new NotFoundException("Reservation khÃ´ng tá»“n táº¡i");
       }
 
       if (reservation.status === ReservationStatus.CONFIRMED) {
-        throw new BadRequestException('Reservation Ä‘Ã£ xÃ¡c nháº­n, khÃ´ng thá»ƒ expire');
+        throw new BadRequestException(
+          "Reservation Ä‘Ã£ xÃ¡c nháº­n, khÃ´ng thá»ƒ expire",
+        );
       }
 
       if (reservation.status === ReservationStatus.EXPIRED) {
@@ -338,7 +384,7 @@ export class ReservationsService {
       if (this.isManualPendingCleanupCandidate(reservation)) {
         return this.resolvePendingManualOrderCleanup(tx, reservation.id, {
           reason,
-          orderAction: 'cancel',
+          orderAction: "cancel",
         });
       }
 
@@ -379,11 +425,11 @@ export class ReservationsService {
 
     await this.prisma.$transaction(async (tx) => {
       for (const reservation of staleReservations) {
-        const reason = 'ttl_expired';
+        const reason = "ttl_expired";
         const expired = this.isManualPendingCleanupCandidate(reservation)
           ? await this.resolvePendingManualOrderCleanup(tx, reservation.id, {
               reason,
-              orderAction: 'cancel',
+              orderAction: "cancel",
             })
           : await this.applyReservationExpiration(tx, reservation, reason);
 
@@ -411,18 +457,18 @@ export class ReservationsService {
     reservationId: string,
     options: {
       reason: string;
-      orderAction: 'cancel' | 'delete';
+      orderAction: "cancel" | "delete";
     },
   ) {
     const reservation = await this.getReservationForMutation(tx, reservationId);
 
     if (!reservation) {
-      throw new NotFoundException('Reservation khÃ´ng tá»“n táº¡i');
+      throw new NotFoundException("Reservation khÃ´ng tá»“n táº¡i");
     }
 
     if (!this.isManualPendingCleanupCandidate(reservation)) {
       throw new BadRequestException(
-        'Reservation is not backing an eligible manual pending order.',
+        "Reservation is not backing an eligible manual pending order.",
       );
     }
 
@@ -456,7 +502,7 @@ export class ReservationsService {
     }
   }
 
-  getReservation(id: string) {
+  getReservation(id: string, authUser: { userId: string }) {
     return this.prisma.reservation.findUnique({
       where: { id },
       include: {
@@ -474,7 +520,6 @@ export class ReservationsService {
       },
     });
   }
-
   private async createHeldReservationRecord(
     tx: Prisma.TransactionClient,
     params: CreateHeldReservationParams,
@@ -485,11 +530,11 @@ export class ReservationsService {
     ]);
 
     if (!user) {
-      throw new NotFoundException('User khÃ´ng tá»“n táº¡i');
+      throw new NotFoundException("User khÃ´ng tá»“n táº¡i");
     }
 
     if (!event) {
-      throw new NotFoundException('Event khÃ´ng tá»“n táº¡i');
+      throw new NotFoundException("Event khÃ´ng tá»“n táº¡i");
     }
 
     const uniqueSeatIds = this.assertUniqueSeatIds(params.seatIds);
@@ -506,7 +551,7 @@ export class ReservationsService {
 
     if (updatedSeats.count !== uniqueSeatIds.length) {
       throw new ConflictException(
-        'Má»™t hoáº·c nhiá»u gháº¿ Ä‘Ã£ Ä‘Æ°á»£c giá»¯/mua bá»Ÿi ngÆ°á»i khÃ¡c, vui lÃ²ng chá»n gháº¿ khÃ¡c',
+        "Má»™t hoáº·c nhiá»u gháº¿ Ä‘Ã£ Ä‘Æ°á»£c giá»¯/mua bá»Ÿi ngÆ°á»i khÃ¡c, vui lÃ²ng chá»n gháº¿ khÃ¡c",
       );
     }
 
@@ -546,7 +591,7 @@ export class ReservationsService {
     await tx.auditLog.create({
       data: {
         action: params.auditAction,
-        entityType: 'reservation',
+        entityType: "reservation",
         entityId: reservation.id,
         payload: {
           eventId: params.eventId,
@@ -585,7 +630,7 @@ export class ReservationsService {
     tx: Prisma.TransactionClient,
     reservation: ReservationMutationRecord,
     reason: string,
-    manualOrderAction: 'cancel' | 'delete' = 'cancel',
+    manualOrderAction: "cancel" | "delete" = "cancel",
   ): Promise<ExpiredReservationResult> {
     const seatIds = reservation.reservationSeats.map((item) => item.seatId);
     const updatedReservation =
@@ -631,7 +676,7 @@ export class ReservationsService {
     ) {
       usedManualPendingResolver = true;
 
-      if (manualOrderAction === 'delete') {
+      if (manualOrderAction === "delete") {
         await tx.order.delete({
           where: {
             id: updatedReservation.order.id,
@@ -653,8 +698,8 @@ export class ReservationsService {
 
     await tx.auditLog.create({
       data: {
-        action: 'RESERVATION_EXPIRED',
-        entityType: 'reservation',
+        action: "RESERVATION_EXPIRED",
+        entityType: "reservation",
         entityId: updatedReservation.id,
         payload: {
           reason,
@@ -680,7 +725,7 @@ export class ReservationsService {
   }
 
   private isManualPendingCleanupCandidate(
-    reservation: Pick<ReservationMutationRecord, 'status' | 'source' | 'order'>,
+    reservation: Pick<ReservationMutationRecord, "status" | "source" | "order">,
   ) {
     if (
       reservation.status !== ReservationStatus.HELD &&
@@ -716,7 +761,7 @@ export class ReservationsService {
     const uniqueSeatIds = [...new Set(seatIds)];
 
     if (uniqueSeatIds.length !== seatIds.length) {
-      throw new BadRequestException('seatIds khÃ´ng Ä‘Æ°á»£c trÃ¹ng nhau');
+      throw new BadRequestException("seatIds khÃ´ng Ä‘Æ°á»£c trÃ¹ng nhau");
     }
 
     return uniqueSeatIds;
