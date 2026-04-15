@@ -12,7 +12,6 @@ import {
   LiveRoom,
   LiveRoomStatus,
   Prisma,
-  ReservationStatus,
   UserRole,
 } from '@prisma/client';
 import { RtcTokenBuilder } from 'agora-token';
@@ -20,6 +19,7 @@ import { createHash } from 'crypto';
 import { randomUUID } from 'crypto';
 import { REALTIME_TOPICS } from '../../common/constants/realtime-topics';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { AuthUser } from '../auth/interfaces/auth-user.interface';
 import {
   LIVESTREAM_ALLOWED_ROLES,
@@ -28,10 +28,15 @@ import {
   LivestreamRoomStatus,
 } from './constants/livestream.constants';
 import { CreateRoomDto } from './dto/create-room.dto';
+import { CreateCommentDto } from './dto/create-comment.dto';
+import { SendGiftDto } from './dto/send-gift.dto';
+import { ToggleCommentsDto } from './dto/toggle-comments.dto';
 import { IssueLivestreamTokenDto } from './dto/issue-token.dto';
 import { ModerationMuteDto } from './dto/moderation-mute.dto';
 import { ModerationPromoteDto } from './dto/moderation-promote.dto';
 import { ModerationRemoveDto } from './dto/moderation-remove.dto';
+import { StartRoomDto } from './dto/start-room.dto';
+import { EndRoomDto } from './dto/end-room.dto';
 
 @Injectable()
 export class LivestreamService {
@@ -39,6 +44,7 @@ export class LivestreamService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly realtimeGateway: RealtimeGateway,
   ) {}
 
   async createRoom(dto: CreateRoomDto, authUser: AuthUser) {
@@ -105,47 +111,140 @@ export class LivestreamService {
     };
   }
 
-  async getRooms(authUser: AuthUser) {
-    const where: Prisma.LiveRoomWhereInput = {
-      status: {
-        in: [LiveRoomStatus.SCHEDULED, LiveRoomStatus.LIVE],
-      },
-      ...(this.isAdmin(authUser)
-        ? {}
-        : {
-            OR: [
-              {
-                participants: {
-                  some: {
-                    userId: authUser.userId,
-                    role: {
-                      in: [
-                        LiveParticipantRole.HOST,
-                        LiveParticipantRole.CO_HOST,
-                        LiveParticipantRole.AUDIENCE,
-                      ],
-                    },
-                  },
-                },
-              },
-              {
-                event: {
-                  reservations: {
-                    some: {
-                      userId: authUser.userId,
-                      status: ReservationStatus.CONFIRMED,
-                    },
-                  },
-                },
-              },
-            ],
-          }),
-    };
+  async startRoom(roomId: string, dto: StartRoomDto, authUser: AuthUser) {
+    const room = await this.prisma.liveRoom.findUnique({ where: { id: roomId } });
+    if (!room) {
+      throw new NotFoundException('Room không tồn tại');
+    }
 
+    const participant = await this.prisma.liveParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: authUser.userId } },
+    });
+
+    if (!participant || participant.role !== LiveParticipantRole.HOST) {
+      if (!this.isAdmin(authUser)) {
+        throw new ForbiddenException('Chỉ host mới có thể bắt đầu room');
+      }
+    }
+
+    if (room.status === LiveRoomStatus.LIVE) {
+      return { id: room.id, status: 'live', message: 'Room đã đang live' };
+    }
+
+    const updatedRoom = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.liveRoom.update({
+        where: { id: roomId },
+        data: {
+          status: LiveRoomStatus.LIVE,
+          startedAt: new Date(),
+          ...(dto.title ? { title: dto.title } : {}),
+        },
+      });
+
+      await tx.liveTimelineEvent.create({
+        data: {
+          roomId,
+          actorUserId: authUser.userId,
+          action: 'ROOM_STARTED',
+          metadata: { title: dto.title ?? room.title },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          action: 'LIVESTREAM_ROOM_STARTED',
+          entityType: 'livestream_room',
+          entityId: roomId,
+          payload: { userId: authUser.userId, title: dto.title ?? room.title },
+        },
+      });
+
+      return updated;
+    });
+
+    this.eventEmitter.emit(REALTIME_TOPICS.LIVE_ROOM_UPDATED, {
+      roomId,
+      status: 'live',
+      title: updatedRoom.title,
+      startedAt: updatedRoom.startedAt,
+    });
+
+    return {
+      id: updatedRoom.id,
+      title: updatedRoom.title,
+      status: this.mapRoomStatus(updatedRoom.status),
+      started_at: updatedRoom.startedAt?.toISOString(),
+    };
+  }
+
+  async endRoom(roomId: string, dto: EndRoomDto, authUser: AuthUser) {
+    const room = await this.prisma.liveRoom.findUnique({ where: { id: roomId } });
+    if (!room) {
+      throw new NotFoundException('Room không tồn tại');
+    }
+
+    const participant = await this.prisma.liveParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: authUser.userId } },
+    });
+
+    if (!participant || participant.role !== LiveParticipantRole.HOST) {
+      if (!this.isAdmin(authUser)) {
+        throw new ForbiddenException('Chỉ host mới có thể kết thúc room');
+      }
+    }
+
+    if (room.status === LiveRoomStatus.ENDED) {
+      return { id: room.id, status: 'ended', message: 'Room đã kết thúc' };
+    }
+
+    const updatedRoom = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.liveRoom.update({
+        where: { id: roomId },
+        data: { status: LiveRoomStatus.ENDED, endedAt: new Date() },
+      });
+
+      await tx.liveTimelineEvent.create({
+        data: {
+          roomId,
+          actorUserId: authUser.userId,
+          action: 'ROOM_ENDED',
+          metadata: { reason: dto.reason ?? 'host_ended' },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          action: 'LIVESTREAM_ROOM_ENDED',
+          entityType: 'livestream_room',
+          entityId: roomId,
+          payload: { userId: authUser.userId, reason: dto.reason ?? 'host_ended' },
+        },
+      });
+
+      return updated;
+    });
+
+    this.eventEmitter.emit(REALTIME_TOPICS.LIVE_ROOM_UPDATED, {
+      roomId,
+      status: 'ended',
+      endedAt: updatedRoom.endedAt,
+    });
+
+    return {
+      id: updatedRoom.id,
+      status: this.mapRoomStatus(updatedRoom.status),
+      ended_at: updatedRoom.endedAt?.toISOString(),
+    };
+  }
+
+  async getRooms() {
     const rooms = await this.prisma.liveRoom.findMany({
-      where,
+      where: {
+        status: {
+          in: [LiveRoomStatus.SCHEDULED, LiveRoomStatus.LIVE],
+        },
+      },
       include: {
-        event: true,
         participants: {
           where: {
             role: LiveParticipantRole.HOST,
@@ -160,40 +259,16 @@ export class LivestreamService {
     });
 
     const roomIds = rooms.map((room) => room.id);
-
-    const groupedCounts =
-      roomIds.length === 0
-        ? []
-        : await this.prisma.liveParticipant.groupBy({
-            by: ['roomId'],
-            where: {
-              roomId: {
-                in: roomIds,
-              },
-              leftAt: null,
-              role: {
-                in: [
-                  LiveParticipantRole.HOST,
-                  LiveParticipantRole.CO_HOST,
-                  LiveParticipantRole.AUDIENCE,
-                ],
-              },
-            },
-            _count: {
-              _all: true,
-            },
-          });
-
-    const viewerCountByRoom = new Map(groupedCounts.map((item) => [item.roomId, item._count._all]));
+    const viewerCountByRoom = this.realtimeGateway.getViewerCountSnapshot(roomIds);
 
     return {
       data: rooms.map((room) => ({
         id: room.id,
-        event_id: room.eventId,
-        title: room.title ?? room.event?.title ?? null,
+        title: room.title ?? null,
         agora_channel: room.agoraChannel,
         status: this.mapRoomStatus(room.status),
         viewer_count: viewerCountByRoom.get(room.id) ?? 0,
+        viewerCount: viewerCountByRoom.get(room.id) ?? 0,
         host_id: room.participants[0]?.userId ?? null,
         started_at: (room.startedAt ?? room.createdAt).toISOString(),
       })),
@@ -201,6 +276,59 @@ export class LivestreamService {
   }
 
   async issueRtcToken(dto: IssueLivestreamTokenDto, authUser: AuthUser) {
+    const explicitChannel = this.resolveChannelName(dto);
+    if (explicitChannel) {
+      const requestedRole = this.parseContractRole(dto.role);
+      if (!requestedRole) {
+        throw new UnprocessableEntityException({
+          code: 'invalid_role',
+          message: 'role must be one of: host | audience',
+        });
+      }
+
+      if (dto.uid === undefined) {
+        throw new UnprocessableEntityException({
+          code: 'invalid_uid',
+          message: 'uid must be a positive integer',
+        });
+      }
+
+      const { agoraAppId, agoraAppCertificate } = this.resolveAgoraCredentials();
+      const ttlSeconds = this.resolveTokenTtl();
+      const issuedAt = new Date();
+      const expireAt = new Date(issuedAt.getTime() + ttlSeconds * 1000);
+      const token = this.buildRtcToken({
+        agoraAppId,
+        agoraAppCertificate,
+        channelName: explicitChannel,
+        uid: dto.uid,
+        ttlSeconds,
+        isPublisher: requestedRole === 'host',
+      });
+
+      return {
+        data: {
+          token,
+          app_id: agoraAppId,
+          appId: agoraAppId,
+          channel_name: explicitChannel,
+          channelName: explicitChannel,
+          uid: dto.uid,
+          expire_at: expireAt.toISOString(),
+        },
+      };
+    }
+
+    if (!dto.roomId || !dto.userId) {
+      throw new UnprocessableEntityException({
+        code: 'invalid_payload',
+        message: 'roomId and userId are required when channelName is not provided',
+      });
+    }
+
+    const roomId = dto.roomId;
+    const userId = dto.userId;
+
     const requestedRole = this.parseRequestedRole(dto.role);
     if (!requestedRole) {
       throw new UnprocessableEntityException({
@@ -209,7 +337,7 @@ export class LivestreamService {
       });
     }
 
-    if (!this.isAdmin(authUser) && authUser.userId !== dto.user_id) {
+    if (!this.isAdmin(authUser) && authUser.userId !== userId) {
       throw new ForbiddenException({
         code: 'forbidden',
         message: 'user_id must match authenticated user',
@@ -218,7 +346,7 @@ export class LivestreamService {
 
     const room = await this.prisma.liveRoom.findUnique({
       where: {
-        id: dto.room_id,
+        id: roomId,
       },
     });
 
@@ -233,7 +361,7 @@ export class LivestreamService {
       where: {
         roomId_userId: {
           roomId: room.id,
-          userId: dto.user_id,
+          userId,
         },
       },
     });
@@ -245,9 +373,7 @@ export class LivestreamService {
       });
     }
 
-    const canAccessRoom = await this.canAccessRoom(
-      room,
-      dto.user_id,
+    const canAccessRoom = this.canAccessRoom(
       participantAssignment,
       this.isAdmin(authUser),
     );
@@ -261,41 +387,22 @@ export class LivestreamService {
 
     const resolvedRole = this.resolveTokenRole(requestedRole, participantAssignment?.role);
 
-    const agoraAppId = this.configService.get<string>('AGORA_APP_ID');
-    const agoraAppCertificate = this.configService.get<string>('AGORA_APP_CERTIFICATE');
-
-    if (!agoraAppId || !agoraAppCertificate) {
-      throw new InternalServerErrorException({
-        code: 'token_generation_failed',
-        message: 'Agora credentials are not configured on server',
-      });
-    }
+    const { agoraAppId, agoraAppCertificate } = this.resolveAgoraCredentials();
 
     const ttlSeconds = this.resolveTokenTtl();
     const issuedAt = new Date();
     const expireAt = new Date(issuedAt.getTime() + ttlSeconds * 1000);
-    const uid = this.stableAgoraUid(dto.user_id);
+    const uid = this.stableAgoraUid(userId);
     const isPublisher = resolvedRole === 'host' || resolvedRole === 'cohost';
 
-    let token: string;
-    try {
-      token = RtcTokenBuilder.buildTokenWithUidAndPrivilege(
-        agoraAppId,
-        agoraAppCertificate,
-        room.agoraChannel,
-        uid,
-        ttlSeconds,
-        ttlSeconds,
-        isPublisher ? ttlSeconds : 0,
-        isPublisher ? ttlSeconds : 0,
-        isPublisher ? ttlSeconds : 0,
-      );
-    } catch {
-      throw new InternalServerErrorException({
-        code: 'token_generation_failed',
-        message: 'failed to generate agora rtc token',
-      });
-    }
+    const token = this.buildRtcToken({
+      agoraAppId,
+      agoraAppCertificate,
+      channelName: room.agoraChannel,
+      uid,
+      ttlSeconds,
+      isPublisher,
+    });
 
     const persistedParticipantRole =
       participantAssignment?.role ?? LiveParticipantRole.AUDIENCE;
@@ -304,8 +411,8 @@ export class LivestreamService {
       await tx.liveParticipant.upsert({
         where: {
           roomId_userId: {
-            roomId: dto.room_id,
-            userId: dto.user_id,
+            roomId,
+            userId,
           },
         },
         update: {
@@ -313,8 +420,8 @@ export class LivestreamService {
           leftAt: null,
         },
         create: {
-          roomId: dto.room_id,
-          userId: dto.user_id,
+          roomId,
+          userId,
           role: persistedParticipantRole,
           joinedAt: issuedAt,
         },
@@ -322,8 +429,8 @@ export class LivestreamService {
 
       await tx.liveTimelineEvent.create({
         data: {
-          roomId: dto.room_id,
-          actorUserId: dto.user_id,
+          roomId,
+          actorUserId: userId,
           action: 'RTC_TOKEN_ISSUED',
           metadata: {
             role: resolvedRole,
@@ -337,10 +444,10 @@ export class LivestreamService {
         data: {
           action: 'LIVESTREAM_TOKEN_ISSUED',
           entityType: 'livestream_room',
-          entityId: dto.room_id,
+          entityId: roomId,
           payload: {
-            room_id: dto.room_id,
-            user_id: dto.user_id,
+            room_id: roomId,
+            user_id: userId,
             role: resolvedRole,
             issued_at: issuedAt.toISOString(),
             expire_at: expireAt.toISOString(),
@@ -352,9 +459,11 @@ export class LivestreamService {
 
     return {
       data: {
-        app_id: agoraAppId,
-        channel_name: room.agoraChannel,
         token,
+        app_id: agoraAppId,
+        appId: agoraAppId,
+        channel_name: room.agoraChannel,
+        channelName: room.agoraChannel,
         uid,
         expire_at: expireAt.toISOString(),
       },
@@ -423,6 +532,11 @@ export class LivestreamService {
 
     await this.ensureRoomAndUser(dto.room_id, dto.target_user_id);
 
+    const targetUser = await this.prisma.user.findUnique({
+      where: { id: dto.target_user_id },
+      select: { displayName: true },
+    });
+
     const now = new Date();
 
     await this.prisma.$transaction(async (tx) => {
@@ -467,8 +581,13 @@ export class LivestreamService {
 
     this.eventEmitter.emit(REALTIME_TOPICS.LIVE_PARTICIPANT_LEFT, {
       roomId: dto.room_id,
+      room_id: dto.room_id,
       userId: dto.target_user_id,
-      removedBy: authUser.userId,
+      user_id: dto.target_user_id,
+      displayName: targetUser?.displayName ?? dto.target_user_id,
+      display_name: targetUser?.displayName ?? dto.target_user_id,
+      leftAt: now.toISOString(),
+      left_at: now.toISOString(),
     });
 
     this.eventEmitter.emit(REALTIME_TOPICS.LIVE_MODERATION_ACTION, {
@@ -573,9 +692,7 @@ export class LivestreamService {
     };
   }
 
-  private async canAccessRoom(
-    room: LiveRoom,
-    userId: string,
+  private canAccessRoom(
     participant: { role: LiveParticipantRole } | null,
     isAdmin: boolean,
   ) {
@@ -583,25 +700,12 @@ export class LivestreamService {
       return true;
     }
 
-    if (
-      participant &&
-      participant.role !== LiveParticipantRole.BLOCKED
-    ) {
+    if (participant && participant.role !== LiveParticipantRole.BLOCKED) {
       return true;
     }
 
-    const reservation = await this.prisma.reservation.findFirst({
-      where: {
-        userId,
-        eventId: room.eventId ?? undefined,
-        status: ReservationStatus.CONFIRMED,
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    return Boolean(reservation);
+    // không có event gắn kết → ai cũng có thể tham gia với vai trò audience
+    return true;
   }
 
   private resolveTokenRole(
@@ -659,6 +763,73 @@ export class LivestreamService {
     }
 
     return null;
+  }
+
+  private parseContractRole(role: string): 'host' | 'audience' | null {
+    const normalized = role.trim().toLowerCase();
+    if (normalized === 'host' || normalized === 'audience') {
+      return normalized;
+    }
+
+    return null;
+  }
+
+  private resolveChannelName(dto: IssueLivestreamTokenDto) {
+    const fromCamelCase = dto.channelName?.trim();
+    if (fromCamelCase) {
+      return fromCamelCase;
+    }
+
+    const fromSnakeCase = dto.channel_name?.trim();
+    if (fromSnakeCase) {
+      return fromSnakeCase;
+    }
+
+    return null;
+  }
+
+  private resolveAgoraCredentials() {
+    const agoraAppId = this.configService.get<string>('AGORA_APP_ID');
+    const agoraAppCertificate = this.configService.get<string>(
+      'AGORA_APP_CERTIFICATE',
+    );
+
+    if (!agoraAppId || !agoraAppCertificate) {
+      throw new InternalServerErrorException({
+        code: 'agora_token_failed',
+        message: 'Cannot generate Agora token',
+      });
+    }
+
+    return { agoraAppId, agoraAppCertificate };
+  }
+
+  private buildRtcToken(params: {
+    agoraAppId: string;
+    agoraAppCertificate: string;
+    channelName: string;
+    uid: number;
+    ttlSeconds: number;
+    isPublisher: boolean;
+  }) {
+    try {
+      return RtcTokenBuilder.buildTokenWithUidAndPrivilege(
+        params.agoraAppId,
+        params.agoraAppCertificate,
+        params.channelName,
+        params.uid,
+        params.ttlSeconds,
+        params.ttlSeconds,
+        params.isPublisher ? params.ttlSeconds : 0,
+        params.isPublisher ? params.ttlSeconds : 0,
+        params.isPublisher ? params.ttlSeconds : 0,
+      );
+    } catch {
+      throw new InternalServerErrorException({
+        code: 'agora_token_failed',
+        message: 'Cannot generate Agora token',
+      });
+    }
   }
 
   private resolveTokenTtl() {
@@ -759,5 +930,274 @@ export class LivestreamService {
 
   private isAdmin(authUser: AuthUser) {
     return authUser.role === UserRole.ADMIN;
+  }
+
+  // ─── Comments & Gifts ────────────────────────────────────────────────
+
+  async createComment(roomId: string, dto: CreateCommentDto, authUser: AuthUser) {
+    const room = await this.prisma.liveRoom.findUnique({ where: { id: roomId } });
+    if (!room) {
+      throw new NotFoundException('Room không tồn tại');
+    }
+
+    const participant = await this.prisma.liveParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: authUser.userId } },
+    });
+
+    if (participant?.role === LiveParticipantRole.BLOCKED) {
+      throw new ForbiddenException('Bạn đã bị chặn trong room này');
+    }
+
+    const isHostOrCohost =
+      participant?.role === LiveParticipantRole.HOST ||
+      participant?.role === LiveParticipantRole.CO_HOST ||
+      this.isAdmin(authUser);
+
+    // Nếu comments bị tắt, chỉ host/cohost được gửi
+    if (!room.commentsEnabled && !isHostOrCohost) {
+      throw new ForbiddenException('Room đã tắt bình luận');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: authUser.userId },
+      select: { displayName: true },
+    });
+
+    const comment = await this.prisma.liveComment.create({
+      data: {
+        roomId,
+        userId: authUser.userId,
+        message: dto.message,
+        isHost: participant?.role === LiveParticipantRole.HOST || false,
+      },
+    });
+
+    const payload = this.buildCommentPayload({
+      id: comment.id,
+      roomId: comment.roomId,
+      userId: comment.userId,
+      displayName: user?.displayName ?? authUser.userId,
+      message: comment.message,
+      createdAt: comment.createdAt.toISOString(),
+      isHost: comment.isHost,
+    });
+
+    // Broadcast via WebSocket
+    this.realtimeGateway.emitLivestreamRoomEvent(
+      roomId,
+      REALTIME_TOPICS.LIVE_COMMENT_CREATED,
+      payload,
+    );
+
+    return { data: payload };
+  }
+
+  async getComments(roomId: string, limit?: string) {
+    const parsedLimit = Number(limit);
+    const take =
+      Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(Math.floor(parsedLimit), 200)
+        : 50;
+    const comments = await this.prisma.liveComment.findMany({
+      where: { roomId },
+      include: {
+        user: { select: { displayName: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+      take,
+    });
+
+    return {
+      data: comments.map((c) => ({
+        ...this.buildCommentPayload({
+          id: c.id,
+          roomId: c.roomId,
+          userId: c.userId,
+          displayName: c.user.displayName ?? c.userId,
+          message: c.message,
+          createdAt: c.createdAt.toISOString(),
+          isHost: c.isHost,
+        }),
+      })),
+    };
+  }
+
+  async toggleComments(roomId: string, dto: ToggleCommentsDto, authUser: AuthUser) {
+    const room = await this.prisma.liveRoom.findUnique({ where: { id: roomId } });
+    if (!room) {
+      throw new NotFoundException('Room không tồn tại');
+    }
+
+    await this.assertCanModerate(roomId, authUser, false);
+
+    const updated = await this.prisma.liveRoom.update({
+      where: { id: roomId },
+      data: { commentsEnabled: dto.enabled },
+    });
+
+    const payload = {
+      roomId,
+      room_id: roomId,
+      enabled: updated.commentsEnabled,
+      updatedBy: authUser.userId,
+      updated_by: authUser.userId,
+    };
+
+    this.realtimeGateway.emitLivestreamRoomEvent(
+      roomId,
+      REALTIME_TOPICS.LIVE_COMMENTING_TOGGLED,
+      payload,
+    );
+
+    return { data: payload };
+  }
+
+  async sendGift(roomId: string, dto: SendGiftDto, authUser: AuthUser) {
+    const room = await this.prisma.liveRoom.findUnique({ where: { id: roomId } });
+    if (!room) {
+      throw new NotFoundException('Room không tồn tại');
+    }
+
+    const participant = await this.prisma.liveParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: authUser.userId } },
+    });
+
+    if (participant?.role === LiveParticipantRole.BLOCKED) {
+      throw new ForbiddenException('Bạn đã bị chặn trong room này');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: authUser.userId },
+      select: { displayName: true },
+    });
+
+    // Convert lowercase DTO value to uppercase Prisma enum
+    const giftTypeDb = dto.giftType.toUpperCase() as import('@prisma/client').LiveGiftType;
+    const giftMeta = this.getGiftMeta(giftTypeDb);
+
+    const gift = await this.prisma.liveGift.create({
+      data: {
+        roomId,
+        userId: authUser.userId,
+        giftType: giftTypeDb,
+      },
+    });
+
+    const payload = this.buildGiftPayload({
+      id: gift.id,
+      roomId: gift.roomId,
+      userId: gift.userId,
+      displayName: user?.displayName ?? authUser.userId,
+      giftType: dto.giftType.toLowerCase(),
+      giftName: giftMeta.name,
+      giftEmoji: giftMeta.emoji,
+      createdAt: gift.createdAt.toISOString(),
+    });
+
+    this.realtimeGateway.emitLivestreamRoomEvent(
+      roomId,
+      REALTIME_TOPICS.LIVE_GIFT_SENT,
+      payload,
+    );
+
+    return { data: payload };
+  }
+
+  async getGifts(roomId: string, limit?: string) {
+    const parsedLimit = Number(limit);
+    const take =
+      Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(Math.floor(parsedLimit), 100)
+        : 20;
+    const gifts = await this.prisma.liveGift.findMany({
+      where: { roomId },
+      include: {
+        user: { select: { displayName: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+      take,
+    });
+
+    return {
+      data: gifts.map((g) => {
+        const meta = this.getGiftMeta(g.giftType);
+        return this.buildGiftPayload({
+          id: g.id,
+          roomId: g.roomId,
+          userId: g.userId,
+          displayName: g.user.displayName ?? g.userId,
+          giftType: g.giftType.toLowerCase(),
+          giftName: meta.name,
+          giftEmoji: meta.emoji,
+          createdAt: g.createdAt.toISOString(),
+        });
+      }),
+    };
+  }
+
+  private buildCommentPayload(input: {
+    id: string;
+    roomId: string;
+    userId: string;
+    displayName: string;
+    message: string;
+    createdAt: string;
+    isHost: boolean;
+  }) {
+    return {
+      id: input.id,
+      roomId: input.roomId,
+      room_id: input.roomId,
+      userId: input.userId,
+      user_id: input.userId,
+      displayName: input.displayName,
+      display_name: input.displayName,
+      message: input.message,
+      createdAt: input.createdAt,
+      created_at: input.createdAt,
+      isHost: input.isHost,
+      is_host: input.isHost,
+    };
+  }
+
+  private buildGiftPayload(input: {
+    id: string;
+    roomId: string;
+    userId: string;
+    displayName: string;
+    giftType: string;
+    giftName: string;
+    giftEmoji: string;
+    createdAt: string;
+  }) {
+    return {
+      id: input.id,
+      roomId: input.roomId,
+      room_id: input.roomId,
+      userId: input.userId,
+      user_id: input.userId,
+      displayName: input.displayName,
+      display_name: input.displayName,
+      giftType: input.giftType,
+      gift_type: input.giftType,
+      giftName: input.giftName,
+      gift_name: input.giftName,
+      giftEmoji: input.giftEmoji,
+      gift_emoji: input.giftEmoji,
+      createdAt: input.createdAt,
+      created_at: input.createdAt,
+    };
+  }
+
+  private getGiftMeta(giftType: string) {
+    const map: Record<string, { name: string; emoji: string }> = {
+      HEART: { name: 'Heart', emoji: '❤️' },
+      ROSE: { name: 'Rose', emoji: '🌹' },
+      STAR: { name: 'Star', emoji: '⭐' },
+      ROCKET: { name: 'Rocket', emoji: '🚀' },
+      CROWN: { name: 'Crown', emoji: '👑' },
+      DIAMOND: { name: 'Diamond', emoji: '💎' },
+    };
+    return map[giftType] ?? { name: giftType, emoji: '🎁' };
   }
 }

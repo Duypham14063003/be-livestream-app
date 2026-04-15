@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -28,12 +29,7 @@ export class ReservationsService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async createHold(dto: CreateReservationDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: dto.userId } });
-    if (!user) {
-      throw new NotFoundException('User không tồn tại');
-    }
-
+  async createHold(dto: CreateReservationDto, authUser: { userId: string }) {
     const event = await this.prisma.event.findUnique({ where: { id: dto.eventId } });
     if (!event) {
       throw new NotFoundException('Event không tồn tại');
@@ -77,7 +73,7 @@ export class ReservationsService {
 
       const createdReservation = await tx.reservation.create({
         data: {
-          userId: dto.userId,
+          userId: authUser.userId,
           eventId: dto.eventId,
           status: ReservationStatus.HELD,
           expiresAt,
@@ -104,7 +100,7 @@ export class ReservationsService {
           entityId: createdReservation.id,
           payload: {
             eventId: dto.eventId,
-            userId: dto.userId,
+            userId: authUser.userId,
             seatIds: uniqueSeatIds,
             expiresAt,
           },
@@ -125,7 +121,7 @@ export class ReservationsService {
     return reservation;
   }
 
-  async confirmReservation(reservationId: string, dto: ConfirmReservationDto) {
+  async confirmReservation(reservationId: string, dto: ConfirmReservationDto, authUser: { userId: string }) {
     const result = await this.prisma.$transaction(async (tx) => {
       const reservation = await tx.reservation.findUnique({
         where: { id: reservationId },
@@ -142,6 +138,10 @@ export class ReservationsService {
 
       if (!reservation) {
         throw new NotFoundException('Reservation không tồn tại');
+      }
+
+      if (reservation.userId !== authUser.userId) {
+        throw new ForbiddenException('Bạn không có quyền xác nhận reservation này');
       }
 
       if (reservation.status === ReservationStatus.CONFIRMED && reservation.order) {
@@ -484,8 +484,8 @@ export class ReservationsService {
     };
   }
 
-  getReservation(id: string) {
-    return this.prisma.reservation.findUnique({
+  async getReservation(id: string, authUser: { userId: string }) {
+    const reservation = await this.prisma.reservation.findUnique({
       where: { id },
       include: {
         reservationSeats: {
@@ -501,5 +501,15 @@ export class ReservationsService {
         },
       },
     });
+
+    if (!reservation) {
+      throw new NotFoundException('Reservation không tồn tại');
+    }
+
+    if (reservation.userId !== authUser.userId) {
+      throw new ForbiddenException('Bạn không có quyền xem reservation này');
+    }
+
+    return reservation;
   }
 }

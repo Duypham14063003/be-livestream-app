@@ -42,7 +42,6 @@ export class EventsService {
     const event = await this.prisma.event.findUnique({
       where: { id },
       include: {
-        liveRoom: true,
         _count: {
           select: {
             seats: true,

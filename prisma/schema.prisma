@@ -97,6 +97,8 @@ model User {
   orders         Order[]
   liveActions    LiveTimelineEvent[] @relation("LiveActionActor")
   participants   LiveParticipant[]
+  liveComments   LiveComment[]
+  liveGifts      LiveGift[]
 }
 
 model Event {
@@ -110,7 +112,6 @@ model Event {
   updatedAt    DateTime      @updatedAt
   seats        Seat[]
   reservations Reservation[]
-  liveRoom     LiveRoom?
 }
 
 model Seat {
@@ -204,19 +205,20 @@ model Ticket {
 }
 
 model LiveRoom {
-  id            String              @id @default(cuid())
-  eventId        String?             @unique
-  title          String?
-  agoraChannel   String              @unique
-  status         LiveRoomStatus      @default(SCHEDULED)
-  startedAt      DateTime?
-  endedAt        DateTime?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-  event          Event?              @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  participants   LiveParticipant[]
-  overlays       LiveOverlay[]
-  timelineEvents LiveTimelineEvent[]
+  id               String              @id @default(cuid())
+  title            String?
+  agoraChannel     String              @unique
+  status           LiveRoomStatus      @default(SCHEDULED)
+  startedAt        DateTime?
+  endedAt          DateTime?
+  commentsEnabled  Boolean             @default(true)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  participants     LiveParticipant[]
+  overlays         LiveOverlay[]
+  timelineEvents   LiveTimelineEvent[]
+  comments         LiveComment[]
+  gifts            LiveGift[]
 
   @@index([status, startedAt])
 }
@@ -254,6 +256,42 @@ model LiveTimelineEvent {
   createdAt    DateTime @default(now())
   room         LiveRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
   actor        User?    @relation("LiveActionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+}
+
+enum LiveGiftType {
+  HEART
+  ROSE
+  STAR
+  ROCKET
+  CROWN
+  DIAMOND
+}
+
+model LiveComment {
+  id        String   @id @default(cuid())
+  roomId    String
+  userId    String
+  message   String
+  isHost    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  room      LiveRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+  @@index([userId])
+}
+
+model LiveGift {
+  id        String      @id @default(cuid())
+  roomId    String
+  userId    String
+  giftType  LiveGiftType
+  createdAt DateTime    @default(now())
+  room      LiveRoom    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+  @@index([userId])
 }
 
 model Refund {

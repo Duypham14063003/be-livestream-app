@@ -57,42 +57,41 @@ async function main() {
       startAt: start,
       endAt: end,
       venueType: VenueType.HYBRID,
-      liveRoom: {
+    },
+  });
+
+  const liveRoom = await prisma.liveRoom.create({
+    data: {
+      title: 'Tech Broadcast Summit 2026 - Live',
+      agoraChannel: 'tech-broadcast-summit-2026',
+      status: LiveRoomStatus.LIVE,
+      startedAt: new Date(),
+      participants: {
         create: {
-          agoraChannel: 'tech-broadcast-summit-2026',
-          status: LiveRoomStatus.LIVE,
-          startedAt: new Date(),
-          participants: {
-            create: {
-              userId: host.id,
-              role: LiveParticipantRole.HOST,
-            },
-          },
-          overlays: {
-            createMany: {
-              data: [
-                {
-                  type: 'banner',
-                  payload: {
-                    text: 'Early bird ticket ends in 2 hours',
-                    cta: 'Book now',
-                  },
-                },
-                {
-                  type: 'poll',
-                  payload: {
-                    question: 'Bạn mong chờ track nào nhất?',
-                    options: ['AI', 'Cloud', 'Mobile'],
-                  },
-                },
-              ],
-            },
-          },
+          userId: host.id,
+          role: LiveParticipantRole.HOST,
         },
       },
-    },
-    include: {
-      liveRoom: true,
+      overlays: {
+        createMany: {
+          data: [
+            {
+              type: 'banner',
+              payload: {
+                text: 'Early bird ticket ends in 2 hours',
+                cta: 'Book now',
+              },
+            },
+            {
+              type: 'poll',
+              payload: {
+                question: 'Bạn mong chờ track nào nhất?',
+                options: ['AI', 'Cloud', 'Mobile'],
+              },
+            },
+          ],
+        },
+      },
     },
   });
 
@@ -134,7 +133,7 @@ async function main() {
   });
 
   console.log(
-    `Seed done: event=${event.id}, room=${event.liveRoom?.id}, seats=${seats.length}`,
+    `Seed done: event=${event.id}, room=${liveRoom.id}, seats=${seats.length}`,
   );
 }
 

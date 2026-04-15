@@ -30,9 +30,11 @@ describe('LivestreamController (integration)', () => {
     }),
     issueRtcToken: jest.fn().mockResolvedValue({
       data: {
-        app_id: 'app-id',
-        channel_name: 'room_001',
         token: '007eJx_mock',
+        app_id: 'app-id',
+        appId: 'app-id',
+        channel_name: 'room_001',
+        channelName: 'room_001',
         uid: 10001,
         expire_at: new Date().toISOString(),
       },
@@ -74,14 +76,15 @@ describe('LivestreamController (integration)', () => {
   it('issueToken should return rtc token payload', async () => {
     const response = await controller.issueToken(
       {
-        room_id: 'room_001',
-        user_id: 'user_001',
-        role: 'audience',
+        channelName: 'event-live-001',
+        uid: 1001,
+        role: 'host',
       },
       authUser,
     );
 
     expect(response.data.channel_name).toBe('room_001');
+    expect(response.data.channelName).toBe('room_001');
     expect(response.data.token).toContain('007');
   });
 });

@@ -7,6 +7,21 @@ import { RealtimeGateway } from './realtime.gateway';
 export class RealtimeEventsListener {
   constructor(private readonly realtimeGateway: RealtimeGateway) {}
 
+  private asRoomPayload(
+    payload: unknown,
+  ): { roomId: string } | null {
+    if (
+      typeof payload === 'object' &&
+      payload !== null &&
+      'roomId' in payload &&
+      typeof (payload as { roomId?: unknown }).roomId === 'string'
+    ) {
+      return payload as { roomId: string };
+    }
+
+    return null;
+  }
+
   @OnEvent(REALTIME_TOPICS.SEAT_UPDATED)
   onSeatUpdated(payload: unknown) {
     this.realtimeGateway.publish(REALTIME_TOPICS.SEAT_UPDATED, payload);
@@ -29,11 +44,31 @@ export class RealtimeEventsListener {
 
   @OnEvent(REALTIME_TOPICS.LIVE_PARTICIPANT_JOINED)
   onLiveParticipantJoined(payload: unknown) {
+    const roomPayload = this.asRoomPayload(payload);
+    if (roomPayload) {
+      this.realtimeGateway.emitLivestreamRoomEvent(
+        roomPayload.roomId,
+        REALTIME_TOPICS.LIVE_PARTICIPANT_JOINED,
+        payload,
+      );
+      return;
+    }
+
     this.realtimeGateway.publish(REALTIME_TOPICS.LIVE_PARTICIPANT_JOINED, payload);
   }
 
   @OnEvent(REALTIME_TOPICS.LIVE_PARTICIPANT_LEFT)
   onLiveParticipantLeft(payload: unknown) {
+    const roomPayload = this.asRoomPayload(payload);
+    if (roomPayload) {
+      this.realtimeGateway.emitLivestreamRoomEvent(
+        roomPayload.roomId,
+        REALTIME_TOPICS.LIVE_PARTICIPANT_LEFT,
+        payload,
+      );
+      return;
+    }
+
     this.realtimeGateway.publish(REALTIME_TOPICS.LIVE_PARTICIPANT_LEFT, payload);
   }
 
@@ -50,5 +85,10 @@ export class RealtimeEventsListener {
   @OnEvent(REALTIME_TOPICS.LIVE_ROOM_CREATED)
   onLiveRoomCreated(payload: unknown) {
     this.realtimeGateway.publish(REALTIME_TOPICS.LIVE_ROOM_CREATED, payload);
+  }
+
+  @OnEvent(REALTIME_TOPICS.LIVE_ROOM_UPDATED)
+  onLiveRoomUpdated(payload: unknown) {
+    this.realtimeGateway.publish(REALTIME_TOPICS.LIVE_ROOM_UPDATED, payload);
   }
 }
