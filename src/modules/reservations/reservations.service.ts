@@ -83,7 +83,7 @@ export class ReservationsService {
     const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
     const reservation = await this.prisma.$transaction((tx) =>
       this.createHeldReservationRecord(tx, {
-        userId: dto.userId,
+        userId: authUser.userId,
         eventId: dto.eventId,
         seatIds: dto.seatIds,
         source: ReservationSource.CHECKOUT,
@@ -91,73 +91,6 @@ export class ReservationsService {
         auditAction: "RESERVATION_HELD",
       }),
     );
-
-    const reservation = await this.prisma.$transaction(async (tx) => {
-      const updatedSeats = await tx.seat.updateMany({
-        where: {
-          id: { in: uniqueSeatIds },
-          eventId: dto.eventId,
-          status: SeatStatus.AVAILABLE,
-        },
-        data: {
-          status: SeatStatus.HELD,
-        },
-      });
-
-      if (updatedSeats.count !== uniqueSeatIds.length) {
-        throw new ConflictException(
-          "Một hoặc nhiều ghế đã được giữ/mua bởi người khác, vui lòng chọn ghế khác",
-        );
-      }
-
-      const seats = await tx.seat.findMany({
-        where: {
-          id: { in: uniqueSeatIds },
-        },
-        select: {
-          id: true,
-          price: true,
-        },
-      });
-
-      const createdReservation = await tx.reservation.create({
-        data: {
-          userId: authUser.userId,
-          eventId: dto.eventId,
-          status: ReservationStatus.HELD,
-          expiresAt,
-          reservationSeats: {
-            create: seats.map((seat) => ({
-              seatId: seat.id,
-              price: seat.price,
-            })),
-          },
-        },
-        include: {
-          reservationSeats: {
-            include: {
-              seat: true,
-            },
-          },
-        },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          action: "RESERVATION_HELD",
-          entityType: "reservation",
-          entityId: createdReservation.id,
-          payload: {
-            eventId: dto.eventId,
-            userId: authUser.userId,
-            seatIds: uniqueSeatIds,
-            expiresAt,
-          },
-        },
-      });
-
-      return createdReservation;
-    });
 
     this.eventEmitter.emit(REALTIME_TOPICS.SEAT_UPDATED, {
       eventId: dto.eventId,
@@ -197,7 +130,11 @@ export class ReservationsService {
     });
   }
 
-  async confirmReservation(reservationId: string, dto: ConfirmReservationDto) {
+  async confirmReservation(
+    reservationId: string,
+    dto: ConfirmReservationDto,
+    authUser?: { userId: string },
+  ) {
     const result = await this.prisma.$transaction(async (tx) => {
       const reservation = await tx.reservation.findUnique({
         where: { id: reservationId },
@@ -216,7 +153,7 @@ export class ReservationsService {
         throw new NotFoundException("Reservation khÃ´ng tá»“n táº¡i");
       }
 
-      if (reservation.userId !== authUser.userId) {
+      if (authUser && reservation.userId !== authUser.userId) {
         throw new ForbiddenException(
           "Bạn không có quyền xác nhận reservation này",
         );

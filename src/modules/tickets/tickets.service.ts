@@ -65,8 +65,8 @@ export class TicketsService {
     return ticket;
   }
 
-  async getTicketPdf(id: string) {
-    const document = await this.resolveTicketDocument(id);
+  async getTicketPdf(id: string, userId: string) {
+    const document = await this.resolveTicketDocument(id, userId);
 
     return {
       ticketId: document.ticketId,
@@ -74,18 +74,15 @@ export class TicketsService {
     };
   }
 
-  async resolveTicketDocument(id: string) {
+  async resolveTicketDocument(id: string, userId?: string) {
     const ticket = await this.prisma.ticket.findUnique({
       where: { id },
-      include: {
-        order: true,
-        select: {
-          id: true,
-          pdfUrl: true,
-          order: {
-            select: {
-              userId: true,
-            },
+      select: {
+        id: true,
+        pdfUrl: true,
+        order: {
+          select: {
+            userId: true,
           },
         },
       },
@@ -95,7 +92,7 @@ export class TicketsService {
       throw new NotFoundException("Ticket khong ton tai");
     }
 
-    if (ticket.order.userId !== userId) {
+    if (userId && ticket.order.userId !== userId) {
       throw new ForbiddenException("Bạn không có quyền tải ticket này");
     }
     const hasStoredDocument = Boolean(ticket.pdfUrl);
