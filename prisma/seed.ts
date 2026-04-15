@@ -7,10 +7,16 @@ import {
   UserRole,
   VenueType,
 } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
 async function main() {
+  const adminSeedEmail = process.env.ADMIN_SEED_EMAIL ?? 'admin@demo.local';
+  const adminSeedPassword = process.env.ADMIN_SEED_PASSWORD ?? 'Admin1234!';
+  const adminSeedDisplayName = process.env.ADMIN_SEED_DISPLAY_NAME ?? 'Operations Admin';
+  const adminSeedPasswordHash = await bcrypt.hash(adminSeedPassword, 10);
+
   await prisma.$transaction([
     prisma.auditLog.deleteMany(),
     prisma.refund.deleteMany(),
@@ -28,7 +34,7 @@ async function main() {
     prisma.user.deleteMany(),
   ]);
 
-  const [customer, host] = await prisma.$transaction([
+  const [customer, host, admin] = await prisma.$transaction([
     prisma.user.create({
       data: {
         email: 'customer@demo.local',
@@ -41,6 +47,14 @@ async function main() {
         email: 'host@demo.local',
         phone: '+8499990002',
         role: UserRole.HOST,
+      },
+    }),
+    prisma.user.create({
+      data: {
+        email: adminSeedEmail,
+        displayName: adminSeedDisplayName,
+        password: adminSeedPasswordHash,
+        role: UserRole.ADMIN,
       },
     }),
   ]);
@@ -127,6 +141,7 @@ async function main() {
       entityId: event.id,
       payload: {
         seededUsers: [customer.id, host.id],
+        adminId: admin.id,
         seededSeats: seats.length,
         defaultProvider: PaymentProvider.STRIPE,
       },
@@ -134,7 +149,7 @@ async function main() {
   });
 
   console.log(
-    `Seed done: event=${event.id}, room=${event.liveRoom?.id}, seats=${seats.length}`,
+    `Seed done: event=${event.id}, room=${event.liveRoom?.id}, seats=${seats.length}, admin=${adminSeedEmail}`,
   );
 }
 

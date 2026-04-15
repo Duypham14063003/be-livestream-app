@@ -1,9 +1,15 @@
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { isAccountDeleted, isAccountSuspended } from './account-state';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -18,26 +24,26 @@ export class AuthService {
 
   async register(dto: RegisterDto) {
     if (!dto.email && !dto.phone) {
-      throw new BadRequestException('email hoặc phone là bắt buộc');
+      throw new BadRequestException('Email or phone is required.');
     }
 
-    // Check unique email/phone
     const existingEmail = dto.email
       ? await this.prisma.user.findUnique({ where: { email: dto.email } })
       : null;
     if (existingEmail) {
-      throw new ConflictException('Email đã được sử dụng');
+      throw new ConflictException('Email is already in use.');
     }
 
     const existingPhone = dto.phone
       ? await this.prisma.user.findUnique({ where: { phone: dto.phone } })
       : null;
     if (existingPhone) {
-      throw new ConflictException('Số điện thoại đã được sử dụng');
+      throw new ConflictException('Phone number is already in use.');
     }
 
-    // Hash password
-    const saltRounds = Number(this.configService.get<string>('BCRYPT_SALT_ROUNDS') ?? 10);
+    const saltRounds = Number(
+      this.configService.get<string>('BCRYPT_SALT_ROUNDS') ?? 10,
+    );
     const hashedPassword = await bcrypt.hash(dto.password, saltRounds);
 
     const user = await this.prisma.user.create({
@@ -68,30 +74,32 @@ export class AuthService {
 
   async login(dto: LoginDto) {
     if (!dto.email && !dto.phone) {
-      throw new BadRequestException('email hoặc phone là bắt buộc');
+      throw new BadRequestException('Email or phone is required.');
     }
 
-    // Find user by email or phone
     const user = await this.prisma.user.findFirst({
       where: dto.email ? { email: dto.email } : { phone: dto.phone },
     });
 
     if (!user) {
-      throw new BadRequestException('Tài khoản không tồn tại. Vui lòng đăng ký trước.');
+      throw new BadRequestException('Account does not exist.');
     }
 
-    // If user has a password (registered via /auth/register), verify it
+    if (isAccountDeleted(user)) {
+      throw new UnauthorizedException('Account is not available.');
+    }
+
+    if (isAccountSuspended(user)) {
+      throw new UnauthorizedException('Account is suspended.');
+    }
+
     if (user.password) {
-      // OTP is used as password in mock OTP flow
       const isPasswordValid = await bcrypt.compare(dto.otp, user.password);
       if (!isPasswordValid) {
-        throw new UnauthorizedException('Mật khẩu / OTP không đúng');
+        throw new UnauthorizedException('Password or OTP is incorrect.');
       }
-    } else {
-      // Legacy: OTP-based login without password (mock OTP — any string >=4 chars works)
-      if (dto.otp.length < 4) {
-        throw new BadRequestException('OTP phải có ít nhất 4 ký tự');
-      }
+    } else if (dto.otp.length < 4) {
+      throw new BadRequestException('OTP must contain at least 4 characters.');
     }
 
     const tokens = await this.signTokens(user.id, user.role);
@@ -112,27 +120,27 @@ export class AuthService {
       );
 
       if (payload.sub !== dto.userId) {
-        throw new UnauthorizedException('refresh token không hợp lệ');
+        throw new UnauthorizedException('Refresh token is invalid.');
       }
 
       const user = await this.prisma.user.findUnique({
         where: { id: dto.userId },
       });
 
-      if (!user) {
-        throw new UnauthorizedException('user không tồn tại');
+      if (!user || isAccountDeleted(user) || isAccountSuspended(user)) {
+        throw new UnauthorizedException('User is not available.');
       }
 
       return this.signTokens(user.id, user.role);
     } catch {
-      throw new UnauthorizedException('refresh token không hợp lệ');
+      throw new UnauthorizedException('Refresh token is invalid.');
     }
   }
 
   logout() {
     return {
       success: true,
-      message: 'Đăng xuất thành công',
+      message: 'Signed out successfully.',
     };
   }
 

@@ -34,6 +34,11 @@ enum ReservationStatus {
   CANCELLED
 }
 
+enum ReservationSource {
+  CHECKOUT
+  ADMIN_MANUAL_ORDER
+}
+
 enum OrderStatus {
   PENDING
   PAID
@@ -47,6 +52,9 @@ enum PaymentProvider {
   PAYPAL
   APPLE_PAY
   GOOGLE_PAY
+  CASH
+  BANK_TRANSFER
+  QR_CODE
 }
 
 enum PaymentStatus {
@@ -79,24 +87,29 @@ enum LiveParticipantRole {
 enum RefundStatus {
   PENDING
   SUCCEEDED
+  REJECTED
   FAILED
 }
 
 model User {
-  id             String            @id @default(cuid())
-  email          String?           @unique
-  phone          String?           @unique
-  password       String?
-  displayName    String?
-  role           UserRole          @default(USER)
-  kycStatus      String?
-  trustedDevice  String?
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
-  reservations   Reservation[]
-  orders         Order[]
-  liveActions    LiveTimelineEvent[] @relation("LiveActionActor")
-  participants   LiveParticipant[]
+  id              String              @id @default(cuid())
+  email           String?             @unique
+  phone           String?             @unique
+  password        String?
+  displayName     String?
+  role            UserRole            @default(USER)
+  kycStatus       String?
+  trustedDevice   String?
+  suspendedAt     DateTime?
+  deletedAt       DateTime?
+  anonymizedAt    DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  reservations    Reservation[]
+  orders          Order[]
+  reviewedRefunds Refund[]            @relation("RefundReviewer")
+  liveActions     LiveTimelineEvent[] @relation("LiveActionActor")
+  participants    LiveParticipant[]
 }
 
 model Event {
@@ -111,6 +124,7 @@ model Event {
   seats        Seat[]
   reservations Reservation[]
   liveRoom     LiveRoom?
+  cancelledAt  DateTime?
 }
 
 model Seat {
@@ -135,6 +149,7 @@ model Reservation {
   userId           String
   eventId          String
   status           ReservationStatus @default(HELD)
+  source           ReservationSource @default(CHECKOUT)
   expiresAt        DateTime
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -161,18 +176,26 @@ model ReservationSeat {
 }
 
 model Order {
-  id             String      @id @default(cuid())
-  userId         String
-  reservationId  String      @unique
-  amount         Int
-  currency       String      @default("USD")
-  status         OrderStatus @default(PENDING)
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-  user           User        @relation(fields: [userId], references: [id], onDelete: Restrict)
-  reservation    Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
-  payment        Payment?
-  tickets        Ticket[]
+  id            String      @id @default(cuid())
+  userId        String
+  reservationId String      @unique
+  amount        Int
+  currency      String      @default("USD")
+  status        OrderStatus @default(PENDING)
+  adminNote     String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  user          User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  payment       Payment?
+  tickets       Ticket[]
+}
+
+model SystemSetting {
+  key       String   @id
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Payment {
@@ -190,21 +213,21 @@ model Payment {
 }
 
 model Ticket {
-  id          String      @id @default(cuid())
+  id          String       @id @default(cuid())
   orderId     String
-  seatId      String      @unique
-  qrCode      String      @unique
+  seatId      String       @unique
+  qrCode      String       @unique
   pdfUrl      String?
   status      TicketStatus @default(ACTIVE)
   checkedInAt DateTime?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  order       Order       @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  seat        Seat        @relation(fields: [seatId], references: [id], onDelete: Restrict)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  seat        Seat         @relation(fields: [seatId], references: [id], onDelete: Restrict)
 }
 
 model LiveRoom {
-  id            String              @id @default(cuid())
+  id             String              @id @default(cuid())
   eventId        String?             @unique
   title          String?
   agoraChannel   String              @unique
@@ -222,14 +245,14 @@ model LiveRoom {
 }
 
 model LiveParticipant {
-  id        String              @id @default(cuid())
-  roomId    String
-  userId    String
-  role      LiveParticipantRole @default(AUDIENCE)
-  joinedAt  DateTime            @default(now())
-  leftAt    DateTime?
-  room      LiveRoom            @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user      User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  id       String              @id @default(cuid())
+  roomId   String
+  userId   String
+  role     LiveParticipantRole @default(AUDIENCE)
+  joinedAt DateTime            @default(now())
+  leftAt   DateTime?
+  room     LiveRoom            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User                @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@unique([roomId, userId])
 }
@@ -247,25 +270,31 @@ model LiveOverlay {
 
 model LiveTimelineEvent {
   id          String   @id @default(cuid())
-  roomId       String
-  actorUserId  String?
-  action       String
-  metadata     Json?
-  createdAt    DateTime @default(now())
-  room         LiveRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  actor        User?    @relation("LiveActionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  roomId      String
+  actorUserId String?
+  action      String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  room        LiveRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actor       User?    @relation("LiveActionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 }
 
 model Refund {
   id             String       @id @default(cuid())
-  paymentId       String
-  amount          Int
-  reason          String?
-  status          RefundStatus @default(PENDING)
-  idempotencyKey  String       @unique
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  payment         Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  paymentId      String
+  reviewedById   String?
+  amount         Int
+  reason         String?
+  decisionNote   String?
+  status         RefundStatus @default(PENDING)
+  idempotencyKey String       @unique
+  reviewedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  payment        Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  reviewedBy     User?        @relation("RefundReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
 }
 
 model AuditLog {
