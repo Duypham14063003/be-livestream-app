@@ -1734,3 +1734,4 @@ agoraEngine.joinChannel(
 - CORS hiện mở toàn bộ (`origin: '*'`) — production nên restrict.
 
 # be-livestream-app
+# api-mvp-livestream
