@@ -4,10 +4,12 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AuthModule } from './modules/auth/auth.module';
+import { AdminModule } from './modules/admin/admin.module';
 import { EventsModule } from './modules/events/events.module';
 import { LivestreamModule } from './modules/livestream/livestream.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { ReservationsModule } from './modules/reservations/reservations.module';
+import { SystemSettingsModule } from './modules/system-settings/system-settings.module';
 import { TicketsModule } from './modules/tickets/tickets.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -28,8 +30,10 @@ import { ReservationExpiryJob } from './jobs/reservation-expiry.job';
     PrismaModule,
     RealtimeModule,
     AuthModule,
+    AdminModule,
     EventsModule,
     ReservationsModule,
+    SystemSettingsModule,
     PaymentsModule,
     TicketsModule,
     LivestreamModule,

@@ -472,8 +472,7 @@ export class LivestreamService {
 
   async muteParticipant(dto: ModerationMuteDto, authUser: AuthUser) {
     await this.assertCanModerate(dto.room_id, authUser, false);
-
-    await this.ensureRoomAndUser(dto.room_id, dto.target_user_id);
+    await this.ensureSupportedModerationTarget(dto.room_id, dto.target_user_id);
 
     const now = new Date();
 
@@ -529,8 +528,7 @@ export class LivestreamService {
 
   async removeParticipant(dto: ModerationRemoveDto, authUser: AuthUser) {
     await this.assertCanModerate(dto.room_id, authUser, false);
-
-    await this.ensureRoomAndUser(dto.room_id, dto.target_user_id);
+    await this.ensureSupportedModerationTarget(dto.room_id, dto.target_user_id);
 
     const targetUser = await this.prisma.user.findUnique({
       where: { id: dto.target_user_id },
@@ -619,28 +617,29 @@ export class LivestreamService {
 
     const promoteToHost = requestedRole === 'host';
     await this.assertCanModerate(dto.room_id, authUser, promoteToHost);
-
-    await this.ensureRoomAndUser(dto.room_id, dto.target_user_id);
+    const existingParticipant = await this.ensureSupportedModerationTarget(
+      dto.room_id,
+      dto.target_user_id,
+    );
 
     const roleToPersist =
       requestedRole === 'host' ? LiveParticipantRole.HOST : LiveParticipantRole.CO_HOST;
 
+    if (existingParticipant.role === roleToPersist) {
+      throw new UnprocessableEntityException({
+        code: 'participant_already_has_role',
+        message: `participant is already ${requestedRole}`,
+      });
+    }
+
     const participant = await this.prisma.$transaction(async (tx) => {
-      const updatedParticipant = await tx.liveParticipant.upsert({
+      const updatedParticipant = await tx.liveParticipant.update({
         where: {
-          roomId_userId: {
-            roomId: dto.room_id,
-            userId: dto.target_user_id,
-          },
+          id: existingParticipant.id,
         },
-        update: {
+        data: {
           role: roleToPersist,
           leftAt: null,
-        },
-        create: {
-          roomId: dto.room_id,
-          userId: dto.target_user_id,
-          role: roleToPersist,
         },
       });
 
@@ -907,11 +906,10 @@ export class LivestreamService {
     }
   }
 
-  private async ensureRoomAndUser(roomId: string, userId: string) {
-    const [room, user] = await Promise.all([
-      this.prisma.liveRoom.findUnique({ where: { id: roomId } }),
-      this.prisma.user.findUnique({ where: { id: userId } }),
-    ]);
+  private async ensureSupportedModerationTarget(roomId: string, userId: string) {
+    const room = await this.prisma.liveRoom.findUnique({
+      where: { id: roomId },
+    });
 
     if (!room) {
       throw new NotFoundException({
@@ -920,12 +918,37 @@ export class LivestreamService {
       });
     }
 
-    if (!user) {
-      throw new NotFoundException({
-        code: 'user_not_found',
-        message: 'user not found',
+    if (room.status !== LiveRoomStatus.LIVE) {
+      throw new UnprocessableEntityException({
+        code: 'unsupported_room_state',
+        message: 'moderation actions are only available while the room is live',
       });
     }
+
+    const participant = await this.prisma.liveParticipant.findUnique({
+      where: {
+        roomId_userId: {
+          roomId,
+          userId,
+        },
+      },
+    });
+
+    if (!participant || participant.leftAt) {
+      throw new NotFoundException({
+        code: 'participant_not_active',
+        message: 'active participant not found in this room',
+      });
+    }
+
+    if (participant.role === LiveParticipantRole.BLOCKED) {
+      throw new UnprocessableEntityException({
+        code: 'participant_not_moderatable',
+        message: 'blocked participants cannot be moderated from this workflow',
+      });
+    }
+
+    return participant;
   }
 
   private isAdmin(authUser: AuthUser) {

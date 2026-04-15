@@ -1,6 +1,10 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, TicketStatus } from '@prisma/client';
-import { PrismaService } from '../../prisma/prisma.service';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import { Prisma, TicketStatus } from "@prisma/client";
+import { PrismaService } from "../../prisma/prisma.service";
 
 @Injectable()
 export class TicketsService {
@@ -27,7 +31,7 @@ export class TicketsService {
         },
       },
       orderBy: {
-        createdAt: 'desc',
+        createdAt: "desc",
       },
     });
   }
@@ -51,17 +55,26 @@ export class TicketsService {
     });
 
     if (!ticket) {
-      throw new NotFoundException('Ticket không tồn tại');
+      throw new NotFoundException("Ticket khong ton tai");
     }
 
     if (ticket.order.userId !== userId) {
-      throw new ForbiddenException('Bạn không có quyền xem ticket này');
+      throw new ForbiddenException("Bạn không có quyền xem ticket này");
     }
 
     return ticket;
   }
 
-  async getTicketPdf(id: string, userId: string) {
+  async getTicketPdf(id: string) {
+    const document = await this.resolveTicketDocument(id);
+
+    return {
+      ticketId: document.ticketId,
+      pdfUrl: document.documentUrl,
+    };
+  }
+
+  async resolveTicketDocument(id: string) {
     const ticket = await this.prisma.ticket.findUnique({
       where: { id },
       include: {
@@ -79,16 +92,22 @@ export class TicketsService {
     });
 
     if (!ticket) {
-      throw new NotFoundException('Ticket không tồn tại');
+      throw new NotFoundException("Ticket khong ton tai");
     }
 
     if (ticket.order.userId !== userId) {
-      throw new ForbiddenException('Bạn không có quyền tải ticket này');
+      throw new ForbiddenException("Bạn không có quyền tải ticket này");
     }
+    const hasStoredDocument = Boolean(ticket.pdfUrl);
+    const documentUrl =
+      ticket.pdfUrl ?? `https://cdn.example.com/tickets/${ticket.id}.pdf`;
 
     return {
       ticketId: ticket.id,
-      pdfUrl: ticket.pdfUrl ?? `https://cdn.example.com/tickets/${ticket.id}.pdf`,
+      documentUrl,
+      source: hasStoredDocument ? "stored_pdf" : "canonical_fallback",
+      hasStoredDocument,
+      fileName: `ticket-${ticket.id}.pdf`,
     };
   }
 }
